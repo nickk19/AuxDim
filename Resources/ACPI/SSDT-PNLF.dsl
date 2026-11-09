@@ -9,8 +9,11 @@
  * graphics stack. Do NOT add it if your DSDT or another SSDT already defines a PNLF device
  * (check with: ioreg -l | grep -i -E "PNLF|backlight").
  *
- * _UID selects the PWM range Apple's backlight code assumes. 0x13 (19) is the profile with a 16 bit
- * range (maximum 0xFFFF), the one the Intel framebuffer already reports for this panel (bklt max 65535).
+ * _UID is read by WhateverGreen, not by macOS or AuxDim: on Intel graphics it picks the PWM range that
+ * WhateverGreen programs for the framebuffer's backlight. 0x13 (19) is its profile for Coffee Lake and newer,
+ * a 16 bit range (maximum 0xFFFF), which is what the Intel framebuffer reports for this panel (bklt max 65535).
+ * AuxDim takes the range from the brightness parameter itself, so if your setup already uses another value,
+ * keep it.
  *
  * Compile: iasl SSDT-PNLF.dsl   (iasl: `brew install acpica`, or the ACPICA release binaries)
  * Use:     copy SSDT-PNLF.aml to EFI/OC/ACPI/ and add it in config.plist -> ACPI -> Add.

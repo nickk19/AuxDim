@@ -1,6 +1,6 @@
 # Architecture
 
-Status: design document plus the Phase 0 (read-only probe) and Phase 0.5 (opt-in write test) implementation. Statements are tagged:
+Status: design document plus the Phase 0 (read-only probe) and Phase 1 (brightness control) implementation. Statements are tagged:
 
 - **[verified]** read in source code (Apple's open source IOGraphics, Lilu, WhateverGreen, the reference kext) or checked by a compile
 - **[assumed]** plausible but not yet confirmed on real hardware; Phase 0 exists to settle these
@@ -39,7 +39,7 @@ one the Linux i915 driver uses for Intel HDR TCON panels). The plumbing around i
  L1  Input     IODisplay::doIntegerSet("brightness", v)   hook, independent of the GPU driver
         |
         v
- L2  Policy    range mapping, curve, floor (Phase 1); fades, restore after wake (later)
+ L2  Policy    range mapping, curve, floor, level written again on wake (Phase 1); fades (later)
         |
         v
  L3  Backend   chosen per display from EDID quirks + probed capabilities     (Phase 1: Intel nits only)
@@ -62,8 +62,10 @@ one that accepts the value **[verified in IOGraphics source]**. Two consequences
 - The hook runs with the framebuffer lock held **[verified]**, so it only records the request. AUX I/O is deferred to a thread
   call (the probe already works this way).
 - The `params` argument is not always the same thing **[verified in IOGraphics source]**: `setProperties()` passes the entry of the
-  parameter itself (`{min, max, value}`, from `getIntegerRange()`), power handling passes the whole parameter dictionary. The range
-  has to be looked up in both shapes.
+  parameter itself (`{min, max, value}`, from `getIntegerRange()`), the power handling (`updatePowerParam()`) passes the whole
+  parameter dictionary. The range has to be looked up in both shapes. The power handling only sends `brightness` on a display
+  without a `dsyp` (display power) parameter; a display that has one gets `dsyp` instead, which the controller watches to
+  write the level again after a wake.
 - On Tahoe the slider only moves `linear-brightness` **[verified, one machine]**; `brightness` keeps the value it had at start.
 
 By contrast, WhateverGreen applies brightness one level lower, in `AppleIntelFramebufferController::hwSetBacklight`
@@ -77,7 +79,8 @@ GPU driver, and external displays pass through the same function.
 the DisplayPort link status **[verified]**. Going through it, instead of mapping GPU registers, means:
 
 - the driver serialises our transfers with its own AUX traffic (`IOFramebufferI2CInterface::startIO` takes the framebuffer lock)
-- the request is refused with `kIOReturnOffline` when the panel is powered down, instead of touching dead hardware
+- the request is refused with `kIOReturnOffline` while the framebuffer is not powered or is going away, instead of touching dead
+  hardware (it says nothing about the panel itself: during display sleep the panel may well stay powered)
 - no per-GPU register offsets, no vendor PCI IDs
 
 Whether a given driver advertises the native AUX bit is Open Question 2. **[verified, one machine]** AppleIntelFramebuffer under
@@ -98,10 +101,10 @@ First report: Lenovo IdeaPad Slim 5 14IAH8, Samsung OLED panel `ATNA40CT01-0`, W
 |---|---|---|
 | 1 | Does Tahoe's `IOGraphicsFamily` still export `IODisplay::doIntegerSet`? | Yes. The hook was routed and fired for the `AppleDisplay` (the probe is triggered by it). |
 | 2 | Does the driver publish a DisplayPort-native `IOI2CInterface` for the eDP bus? | Yes, and DPCD reads through it succeed from a kext (bus type 1, transaction types `0x13`). |
-| 3 | Which backlight interface does the panel implement? | Both. Intel HDR TCON v1: nits capable, SDR brightness via AUX, nits mode already enabled by the firmware (`0x344` = `0x10`), current level `0x354` = 399, which matches the 400 nit frame-average luminance in the EDID. VESA eDP 1.4b: AUX brightness and PWM pin supported, mode 3 (product), enable bit clear, level `0xFFFF`. The reference kext for another Samsung ATNA panel uses the Intel one (`0x354`). Phase 0.5, first run: AUX writes through the framebuffer's interface work (the VESA level registers took and returned every value) but VESA does not dim the panel while its enable bit is clear, and a 2 byte write to `0x354` was acknowledged but ignored; see [WRITE-TEST.md](WRITE-TEST.md). |
+| 3 | Which backlight interface does the panel implement? | Both. Intel HDR TCON v1: nits capable, SDR brightness via AUX, brightness through AUX already enabled by the firmware (`0x344` = `0x10`: bit 4, `INTEL_EDP_HDR_TCON_BRIGHTNESS_AUX_ENABLE` in Linux), current level `0x354` = 399, which matches the 400 nit frame-average luminance in the EDID. VESA eDP 1.4b: AUX brightness and PWM pin supported, mode 3 (product), enable bit clear, level `0xFFFF`. The reference kext for another Samsung ATNA panel uses the Intel one (`0x354`). Phase 0.5 write test (since removed): AUX writes through the framebuffer's interface work (the VESA level registers took and returned every value) but VESA does not dim the panel while its enable bit is clear, and a 2 byte write to `0x354` was acknowledged but ignored. |
 | 4 | Does macOS emit brightness requests? | No: the display is a plain `AppleDisplay`, `param-brightness` is `absent`. It needs the ACPI `backlight` device (`Resources/ACPI/SSDT-PNLF.dsl`). |
 | 5 | Which range does macOS use? | **[verified, one machine]** With the SSDT-PNLF the display becomes an `AppleBacklightDisplay` and macOS sends two parameters: `brightness` 0...1024 (slider position) and `linear-brightness` 0...65403 (proportional to luminance); `usable-linear-brightness` starts at 655 (1%). The framebuffer's raw `bklt` is 0...65535. Phase 1 does not hard-code any of this: it reads min and max from the parameter that carried the request, prefers `linear-brightness` and publishes the range in `ctl-last`. |
-| 6 | Does the TCON forget the setup after sleep? | Open, not tested yet. Phase 1 retries failed writes for a few seconds and keeps the newest request, but does not yet re-send the level after wake; the first report with `-auxdimctl` will say whether that is needed. |
+| 6 | Does the TCON forget the setup after sleep? | **[verified, one machine, display sleep]** No. With WhateverGreen's `-wex-edp-blank` the panel stays powered through display sleep: macOS sends `dsyp` off and on again, after the wake `0x344` still reads `0x10`, and the level that Phase 1 writes again reads back as expected (`ctl-wake`, `ctl-verify`). System sleep is not tested. Setting `0x344` bit 4 again when a wake clears it is a write that is not made yet. |
 | 7 | Which AUX write shape does the Intel nits register take? | **[verified, one machine]** A 4 byte block `[LSB, MSB, 0, 0]` at `0x354`, as the Linux driver writes it. A 2 byte write is acknowledged and ignored. The panel reads back one nit below the value written. |
 
 ## 5. Safety rules for the write phase
@@ -111,8 +114,8 @@ First report: Lenovo IdeaPad Slim 5 14IAH8, Samsung OLED panel `ATNA40CT01-0`, W
 - Clamp to a minimum luminance so the slider can never produce a black, unrecoverable screen (Phase 1: floor of 10 nits,
   `auxdimminnits`, and the mapping can never leave the floor...maximum range).
 - Rate-limit AUX writes and coalesce bursts of slider events (Phase 1: one write per 30 ms, the newest value wins).
-- Restore a safe level on wake and keep `-auxdimoff` working at all times.
-- Control is opt-in (`-auxdimctl`), never active together with the write test, and only attaches to a display whose Intel nits
+- Write the level again on wake (only while `0x344` still enables AUX brightness) and keep `-auxdimoff` working at all times.
+- Control is opt-in (`-auxdimctl`) and only attaches to a display whose Intel nits
   interface the probe found advertised, enabled and readable. Any other display is left alone.
 
 ## 6. Roadmap
@@ -120,8 +123,8 @@ First report: Lenovo IdeaPad Slim 5 14IAH8, Samsung OLED panel `ATNA40CT01-0`, W
 | Phase | Content |
 |---|---|
 | 0 (done) | Observe `doIntegerSet`, read-only probe, hardware report workflow |
-| 0.5 (done) | Opt-in write test of the two level registers, brightness request counters; SSDT-PNLF for the slider |
-| 1 (now) | One backend, the one the first target panel needs (Intel nits); apply brightness from L1 events, opt-in with `-auxdimctl`. Still to do: redo setup on wake once the first report shows whether it is needed |
+| 0.5 (done) | Opt-in write test of the two level registers (removed afterwards: `auxdimnits=N` checks the write path), brightness request counters; SSDT-PNLF for the slider |
+| 1 (now) | One backend, the one the first target panel needs (Intel nits); apply brightness from L1 events, opt-in with `-auxdimctl`. Still to do: an opt-in to set `0x344` bit 4 again if a wake is ever seen to clear it |
 | 2 | Second backend, EDID keyed quirk table, curve and floor tuning, persistence across reboots |
 | 3 | DDC/CI backend for external monitors, per-display routing |
 | 4 | Polish: fades, packaging, documentation aimed at upstream Hackintosh guides |

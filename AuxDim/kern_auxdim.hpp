@@ -2,10 +2,9 @@
 //  kern_auxdim.hpp
 //  AuxDim
 //
-//  Phase 0: observe the brightness requests macOS sends to every IODisplay and,
-//  on demand, probe the display hardware. No brightness is applied yet.
-//  Phase 0.5 (-auxdimtest): a self-reverting write test of the panel's backlight registers.
-//  Phase 1 (-auxdimctl): apply the brightness macOS asks for, see kern_control.hpp.
+//  With -auxdimprobe or -auxdimctl: watches the display parameters macOS sends to every IODisplay, probes the
+//  display hardware (-auxdimprobe, implied by -auxdimctl) and applies the brightness macOS asks for (-auxdimctl,
+//  see kern_control.hpp). Without either it does nothing.
 //
 //  Copyright © 2026 nickk19. All rights reserved.
 //  Licensed under the BSD 3-Clause License, see LICENSE.
@@ -24,8 +23,11 @@
 
 class AuxDimCore {
 public:
+	/**
+	 *  There is no teardown: once a Lilu plugin has started it is never unloaded (kern_stop in Lilu's plugin_start.cpp
+	 *  refuses), so the hook, the thread calls and the retained display live until shutdown.
+	 */
 	void init();
-	void deinit();
 
 private:
 	/**
@@ -60,7 +62,7 @@ private:
 	/**
 	 *  Deferred probe, see kern_probe.hpp. Disabled unless -auxdimprobe is passed.
 	 */
-	static constexpr size_t MaxProbedDisplays {4};
+	static constexpr size_t MaxProbedDisplays {8};
 	static constexpr uint32_t ProbeDelayMs {3000};
 
 	// While the panel does not answer (offline at boot) the probe is repeated: first quickly, then slowly.
@@ -71,7 +73,7 @@ private:
 	uint32_t ctlAttempts {0};
 	bool probeEnabled {false};
 	volatile uint32_t probeBusy {0};
-	uintptr_t probed[MaxProbedDisplays] {};
+	uint64_t probed[MaxProbedDisplays] {};  // registry entry IDs
 	size_t probedCount {0};
 	IOService *probeDisplay {nullptr};
 	thread_call_t probeCall {nullptr};
@@ -80,29 +82,11 @@ private:
 	static void probeEntry(thread_call_param_t param0, thread_call_param_t param1);
 
 	/**
-	 *  Opt-in write test, see kern_selftest.hpp. Armed after a probe found a usable backlight interface,
-	 *  then a sweep runs on the first such display: stage 0 the Intel nits interface and, with -auxdimtestvesa,
-	 *  stage 1 (a minute later) the VESA one, so what is seen on screen can be told apart.
-	 */
-	static constexpr uint32_t TestDelayDefaultSeconds {120};
-	static constexpr uint32_t TestGapSeconds {60};
-	bool testEnabled {false};
-	bool testStarted {false}; // the test runs once, on the first suitable display
-	bool testVesa {false};    // -auxdimtestvesa: also sweep the VESA interface, a minute after the Intel one
-	uint32_t testDelaySeconds {TestDelayDefaultSeconds};
-	uint32_t testStage {0};
-	IOService *testDisplay {nullptr};
-	thread_call_t testCall {nullptr};
-
-	void armTest(uint32_t seconds);
-	static void testEntry(thread_call_param_t param0, thread_call_param_t param1);
-
-	/**
 	 *  Brightness control (-auxdimctl, or auxdimnits=N for a fixed level at boot). Needs the probe to have found a
 	 *  usable Intel nits interface; until then requests are only remembered.
 	 */
 	bool ctlEnabled {false};
-	bool ctlAttached {false};
+	uint32_t ctlMaxNitsOverride {0}; // auxdimmaxnits=N, 0 when not set
 	uint32_t ctlRangeMisses {0}; // brightness requests that carried no usable min/max
 	Controller controller;
 
@@ -113,8 +97,11 @@ private:
 	uint32_t brightnessEvents {0};
 	uint32_t lastBrightness {0};
 	uint32_t lastLinearBrightness {0};
+	uint32_t powerEvents {0};   // dsyp changes, see Controller::powerState
+	uint32_t lastPower {0};
 	thread_call_t statusCall {nullptr};
 
+	void scheduleStatus();
 	static void statusEntry(thread_call_param_t param0, thread_call_param_t param1);
 };
 

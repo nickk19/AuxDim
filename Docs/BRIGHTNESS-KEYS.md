@@ -36,8 +36,15 @@ need nothing like this, some need it with other numbers, some route the keys els
 1. Dump your DSDT (from Linux: `cat /sys/firmware/acpi/tables/DSDT > DSDT.aml`, or with SSDTTime) and disassemble it: `iasl -d DSDT.aml`.
 2. Look for the `_Qxx` methods that do `Notify (..., 0x86)` and `Notify (..., 0x87)`. Note their numbers and the path of the device that holds them (the EC).
 3. Edit `SSDT-BRTKEYS.dsl`: the method names, the `External` lines and the `Scope`. Check the path of the keyboard device (`PS2K`) too.
-4. Edit the two patches: `Find` is the method definition as it is in the binary, `14 <length> 5F 51 xx xx 00` (`_Qxx`), `Replace` is the same
-   with `X` instead of `_`. Each must match exactly one place in the DSDT; count the matches before you rely on it.
+4. Edit the two patches. `Find` is the start of the method as it is in the binary: `14`, the package length, the name `5F 51 xx xx`
+   (`_Qxx`) and the flags (`00`). The package length is one byte for a method shorter than 64 bytes and two bytes (`4x yy`) for a
+   longer one, so take it from your DSDT, never from the example:
+   `python3 -c "d=open('DSDT.aml','rb').read(); i=d.find(b'_Q11'); print(d[i-3:i+5].hex(' '))"` prints the bytes around the name
+   (`xx 14 33 5f 51 31 31 00` here: one length byte; `14 4x yy 5f 51 31 31 00` would be two). `Replace` is the same with `X` instead
+   of `_`. `Base` is the path of the EC from step 2 (`\_SB.PC00.LPCB.EC0` in the example): OpenCore starts searching there and
+   skips the patch when the path does not exist, so a wrong path means keys that do nothing. Each `Find` must match exactly one
+   place; count them before you rely on it:
+   `python3 -c "d=open('DSDT.aml','rb').read(); print(d.count(bytes.fromhex('14335f51313100')))"`.
 5. Compile with `iasl SSDT-BRTKEYS.dsl`. To check it against your DSDT, apply the two renames to a copy and compile with `iasl -e <patched DSDT> SSDT-BRTKEYS.dsl`:
    it must report no errors.
 

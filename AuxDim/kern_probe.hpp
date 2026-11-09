@@ -27,9 +27,8 @@ namespace AuxDimProbe {
 	 *  What the probe learned that the rest of the plugin acts on.
 	 */
 	struct Result {
-		bool writable {false};     // a backlight interface is advertised: a write test makes sense
 		bool intelUsable {false};  // Intel nits interface advertised, SDR through AUX, enabled, level readable
-		uint32_t maxNits {0};      // luminance at full brightness: EDID frame-average luminance, else level read + 1
+		uint32_t edidMaxNits {0};  // EDID frame-average luminance, 0 when absent (see Policy::maxNitsFor)
 
 		// Why intelUsable is false. The reads failing with "offline" is what the framebuffer answers while the panel is
 		// not up yet (seen right at boot), so that case is worth another try later; the others are final.
@@ -45,7 +44,7 @@ namespace AuxDimProbe {
 	 *  @param result  optional, filled with what the plugin needs to decide what to do next
 	 *
 	 *  @return true when the display has a native AUX interface and advertises at least one backlight
-	 *          interface, i.e. when a write test makes sense
+	 *          interface
 	 */
 	bool run(IOService *display, Result *result = nullptr);
 
@@ -55,6 +54,11 @@ namespace AuxDimProbe {
 	 */
 	void publish(const char *key, const char *value);
 	void publishf(const char *key, const char *format, ...) __printflike(2, 3);
+
+	/**
+	 *  Property only, no log line: for values that change with every slider move.
+	 */
+	void statusf(const char *key, const char *format, ...) __printflike(2, 3);
 
 	/**
 	 *  Seconds since boot, to correlate what is seen on screen with the published lines.

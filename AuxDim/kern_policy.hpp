@@ -17,6 +17,43 @@
 namespace Policy {
 
 	/**
+	 *  Luminance range a maximum must lie in to be trusted. A laptop panel below 100 nits or above 1000 nits at full SDR
+	 *  brightness is far more likely a decoding error than a real panel.
+	 */
+	static constexpr uint32_t MinMaxNits {100};
+	static constexpr uint32_t MaxMaxNits {1000};
+
+	inline bool plausibleMaxNits(uint32_t nits) {
+		return nits >= MinMaxNits && nits <= MaxMaxNits;
+	}
+
+	/**
+	 *  Luminance at the top of the range, or 0 when none can be trusted (the controller must then stay inert).
+	 *
+	 *  Same source as the Linux driver (drm_calculate_luminance_range, intel_dp_aux_hdr_setup_backlight): the EDID
+	 *  frame-average luminance (CTA-861 HDR static metadata). Linux does not use the Intel interface at all without
+	 *  that metadata; here the user can supply the value instead.
+	 *
+	 *  @param edidAverageNits EDID frame-average luminance, 0 when absent
+	 *  @param overrideNits    auxdimmaxnits boot argument, 0 when not set
+	 */
+	inline uint32_t maxNitsFor(uint32_t edidAverageNits, uint32_t overrideNits) {
+		if (overrideNits)
+			return plausibleMaxNits(overrideNits) ? overrideNits : 0;
+		return plausibleMaxNits(edidAverageNits) ? edidAverageNits : 0;
+	}
+
+	/**
+	 *  Lowest luminance ever sent: the requested floor, at least 1 nit and always well below the top of the range.
+	 */
+	inline uint32_t floorNitsFor(uint32_t requestedFloor, uint32_t maxNits) {
+		uint32_t floor = requestedFloor ? requestedFloor : 1;
+		if (floor >= maxNits)
+			floor = maxNits / 4;
+		return floor ? floor : 1;
+	}
+
+	/**
 	 *  Panel luminance in nits for a display brightness value.
 	 *
 	 *  The result always lies in [floorNits, maxNits], so no slider position can produce a black screen.

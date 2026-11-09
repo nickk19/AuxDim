@@ -7,8 +7,8 @@ The probe answers four questions about your machine, none of which can be guesse
 3. Which backlight interface does the panel implement: VESA eDP AUX, Intel HDR/SDR TCON nits, or only PWM?
 4. What are the display's identity (EDID) and the range macOS uses for brightness?
 
-The probe only **reads**. It never writes to the panel or to any register. Writing is a separate, opt-in step described in
-[WRITE-TEST.md](WRITE-TEST.md).
+The probe only **reads**. It never writes to the panel or to any register. The only part of the plugin that writes is brightness
+control (`-auxdimctl`, see [CONTROL.md](CONTROL.md)), and it writes only the brightness level.
 
 ## Steps
 
@@ -29,13 +29,13 @@ ioreg -l -w0 | grep -i -E "PNLF|APP0002|backlight" | cut -c1-200 > backlight-nod
 sudo log show --last boot --info --debug --predicate 'eventMessage CONTAINS[c] "auxdim"' > auxdim-log.txt
 ```
 
-   Every probe result is also a property of `AuxDim`, so the kernel log is optional. On recent macOS versions
-   `dmesg` often shows nothing from kexts and the unified log may not carry their `IOLog` lines either. If you want the
-   plugin's own log lines anyway, use a Debug build of Lilu (the Debug build of this plugin needs it) and add
-   `liludump=60` to `boot-args`: sixty seconds after boot Lilu writes everything the plugins logged to
-   `/var/log/Lilu_<version>_<darwin>.txt`.
+   Every probe result is also a property of `AuxDim`, so the kernel log is optional: whether the plugin's lines reach
+   `dmesg` and `log show` depends on the setup (on the development machine they did not), so an empty `auxdim-log.txt`
+   is not a problem. Lilu can also collect them: with a Debug build of Lilu and `liludump=60` in `boot-args`, sixty
+   seconds after boot it writes everything the plugins logged to `/var/log/Lilu_<version>_<darwin>.txt`. The Debug
+   build of this plugin does not need a Debug Lilu for its extra lines (`-auxdimdbg`); only `liludump` does.
 
-5. Open a *Hardware report* issue and attach the files (the EDID is not sensitive: it contains the model and a serial
+5. Open an issue titled *Hardware report: your laptop model* and attach the files (the EDID is not sensitive: it contains the model and a serial
    of the panel, remove the serial block if you prefer).
 
 ## Reading the output

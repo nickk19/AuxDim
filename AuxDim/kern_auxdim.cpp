@@ -15,7 +15,7 @@
 
 #include "kern_auxdim.hpp"
 #include "kern_probe.hpp"
-#include "kern_selftest.hpp"
+#include "kern_policy.hpp"
 
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSDictionary.h>
@@ -34,34 +34,16 @@ void AuxDimCore::init() {
 
 	probeEnabled = checkKernelArgument("-auxdimprobe");
 
-	// The write test is opt-in and builds on the probe.
-	testEnabled = checkKernelArgument("-auxdimtest");
-	if (testEnabled) {
-		probeEnabled = true;
-		testVesa = checkKernelArgument("-auxdimtestvesa");
-		lilu_get_boot_args("auxdimtestdelay", &testDelaySeconds, sizeof(testDelaySeconds));
-		if (testDelaySeconds < 20)
-			testDelaySeconds = 20;
-		if (testDelaySeconds > 3600)
-			testDelaySeconds = 3600;
-
-		testCall = thread_call_allocate(&AuxDimCore::testEntry, this);
-		if (!testCall) {
-			SYSLOG("auxdim", "failed to allocate the test thread call, write test disabled");
-			testEnabled = false;
-		}
-	}
-
-	// Brightness control is opt-in too. A fixed boot level implies it; the write test excludes it, the two
-	// would fight over the same register.
+	// Brightness control is opt-in. A fixed boot level implies it.
 	uint32_t forcedNits = 0, floorNits = 0;
 	lilu_get_boot_args("auxdimnits", &forcedNits, sizeof(forcedNits));
 	lilu_get_boot_args("auxdimminnits", &floorNits, sizeof(floorNits));
-	ctlEnabled = checkKernelArgument("-auxdimctl") || forcedNits > 0;
-	if (ctlEnabled && testEnabled) {
-		SYSLOG("auxdim", "-auxdimtest and brightness control exclude each other, control disabled for this boot");
-		ctlEnabled = false;
+	lilu_get_boot_args("auxdimmaxnits", &ctlMaxNitsOverride, sizeof(ctlMaxNitsOverride));
+	if (ctlMaxNitsOverride && !Policy::plausibleMaxNits(ctlMaxNitsOverride)) {
+		SYSLOG("auxdim", "auxdimmaxnits=%u is outside %u...%u, ignored", ctlMaxNitsOverride, Policy::MinMaxNits, Policy::MaxMaxNits);
+		ctlMaxNitsOverride = 0;
 	}
+	ctlEnabled = checkKernelArgument("-auxdimctl") || forcedNits > 0;
 	if (ctlEnabled) {
 		probeEnabled = true;
 		if (!controller.init(forcedNits, floorNits)) {
@@ -71,43 +53,34 @@ void AuxDimCore::init() {
 	}
 
 	if (probeEnabled) {
-		probeCall = thread_call_allocate(&AuxDimCore::probeEntry, this);
-		statusCall = thread_call_allocate(&AuxDimCore::statusEntry, this);
+		// ONCE: never two instances of the same call in parallel, see Controller::init.
+		probeCall = thread_call_allocate_with_options(&AuxDimCore::probeEntry, this, THREAD_CALL_PRIORITY_HIGH, THREAD_CALL_OPTIONS_ONCE);
+		statusCall = thread_call_allocate_with_options(&AuxDimCore::statusEntry, this, THREAD_CALL_PRIORITY_HIGH, THREAD_CALL_OPTIONS_ONCE);
 		if (!probeCall) {
 			SYSLOG("auxdim", "failed to allocate the probe thread call, probe disabled");
 			probeEnabled = false;
-			testEnabled = false;
 			ctlEnabled = false;
 		}
 	}
 
-	lilu.onKextLoadForce(&kextIOGraphics, 1,
+	// The hook serves the probe and the controller, and in the Debug build the request log of -auxdimdbg. Without any of
+	// them IOGraphicsFamily is left untouched.
+	bool watch = probeEnabled || ctlEnabled;
+#ifdef DEBUG
+	watch = watch || ADDPR(debugEnabled);
+#endif
+	if (!watch) {
+		SYSLOG("auxdim", "neither -auxdimctl nor -auxdimprobe given, nothing to do");
+		return;
+	}
+
+	// Not onKextLoadForce: that one panics when Lilu cannot take the request. A diagnostic plugin stays inert instead.
+	auto error = lilu.onKextLoad(&kextIOGraphics, 1,
 	[](void *user, KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
 		static_cast<AuxDimCore *>(user)->processKext(patcher, index, address, size);
 	}, this);
-}
-
-void AuxDimCore::deinit() {
-	thread_call_t calls[] = { probeCall, testCall, statusCall };
-	for (auto call : calls) {
-		if (!call)
-			continue;
-		while (!thread_call_free(call))
-			thread_call_cancel(call);
-	}
-	probeCall = testCall = statusCall = nullptr;
-
-	controller.deinit();
-
-	if (probeDisplay) {
-		probeDisplay->release();
-		probeDisplay = nullptr;
-	}
-
-	if (testDisplay) {
-		testDisplay->release();
-		testDisplay = nullptr;
-	}
+	if (error != LiluAPI::Error::NoError)
+		SYSLOG("auxdim", "cannot watch for IOGraphicsFamily (Lilu error %d), plugin is inert", static_cast<int>(error));
 }
 
 void AuxDimCore::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
@@ -146,12 +119,7 @@ void AuxDimCore::handleParameter(IOService *display, OSDictionary *params, const
 		else
 			lastBrightness = value;
 
-		// Publish the counters from a thread call, never from here (framebuffer lock held).
-		if (statusCall) {
-			uint64_t deadline = 0;
-			clock_interval_to_deadline(250, kMillisecondScale, &deadline);
-			thread_call_enter_delayed(statusCall, deadline);
-		}
+		scheduleStatus();
 		if (ctlEnabled && params) {
 			// The range of this very parameter, so the mapping needs no assumption about macOS's scale.
 			// IODisplay::setProperties() hands over the entry of the parameter itself ({min, max, value}); other
@@ -172,6 +140,16 @@ void AuxDimCore::handleParameter(IOService *display, OSDictionary *params, const
 		DBGLOG("auxdim", "%s on %s: %s = %u (accepted by the stack: %s, events so far: %u)",
 			   display->getName(), display->getMetaClass()->getClassName(),
 			   name->getCStringNoCopy(), value, handled ? "yes" : "no", brightnessEvents);
+	} else if (name->isEqualTo(kIODisplayPowerStateKey)) {
+		// Display power (off, dimmed, on). Displays that have this parameter get it instead of brightness 0 when they sleep.
+		powerEvents++;
+		lastPower = value;
+		scheduleStatus();
+		if (ctlEnabled)
+			controller.powerState(display, value);
+
+		DBGLOG("auxdim", "%s on %s: %s = %u (accepted by the stack: %s)", display->getName(),
+			   display->getMetaClass()->getClassName(), name->getCStringNoCopy(), value, handled ? "yes" : "no");
 	}
 
 	// Any parameter is enough to learn that this display exists: the first one triggers the probe,
@@ -180,9 +158,19 @@ void AuxDimCore::handleParameter(IOService *display, OSDictionary *params, const
 		scheduleProbe(display);
 }
 
+void AuxDimCore::scheduleStatus() {
+	// Publish the counters from a thread call, never from the hook (framebuffer lock held).
+	if (statusCall) {
+		uint64_t deadline = 0;
+		clock_interval_to_deadline(250, kMillisecondScale, &deadline);
+		thread_call_enter_delayed(statusCall, deadline);
+	}
+}
+
 void AuxDimCore::scheduleProbe(IOService *display) {
-	// Lock free fast path: this runs for every display parameter, with the framebuffer lock held.
-	const uintptr_t key = reinterpret_cast<uintptr_t>(display);
+	// Lock free fast path: this runs for every display parameter, with the framebuffer lock held. Keyed by registry ID, not
+	// by pointer: a display that replaces a terminated one may get the same address.
+	const uint64_t key = display->getRegistryEntryID();
 	for (size_t i = 0; i < probedCount && i < MaxProbedDisplays; i++) {
 		if (probed[i] == key)
 			return;
@@ -203,6 +191,7 @@ void AuxDimCore::scheduleProbe(IOService *display) {
 	probed[probedCount++] = key;
 	display->retain();
 	probeDisplay = display;
+	ctlAttempts = 0;
 
 	uint64_t deadline = 0;
 	clock_interval_to_deadline(ProbeDelayMs, kMillisecondScale, &deadline);
@@ -218,13 +207,19 @@ void AuxDimCore::probeEntry(thread_call_param_t param0, thread_call_param_t) {
 	bool retrying = false;
 	if (display) {
 		AuxDimProbe::Result result;
-		bool writable = AuxDimProbe::run(display, &result);
+		AuxDimProbe::run(display, &result);
 
-		// Bring the brightness controller up on the first display with a usable Intel nits interface.
-		if (self->ctlEnabled && !self->ctlAttached) {
+		// Offer every display with a usable Intel nits interface to the controller: the first one is driven, a later one
+		// replaces it if it goes away. The status lines are about the display being looked for, so they stay quiet once
+		// one is driven.
+		uint32_t maxNits = Policy::maxNitsFor(result.edidMaxNits, self->ctlMaxNitsOverride);
+		if (self->ctlEnabled && result.intelUsable && maxNits) {
+			self->controller.attach(display, maxNits);
+		} else if (self->ctlEnabled && !self->controller.attached()) {
 			if (result.intelUsable) {
-				self->ctlAttached = true;
-				self->controller.attach(display, result.maxNits);
+				AuxDimProbe::publishf("ctl-state", "inert on this display: the EDID gives no usable luminance range (frame-average "
+									 "%u nits, expected %u...%u); set auxdimmaxnits=N to the panel's full brightness to enable control",
+									 result.edidMaxNits, Policy::MinMaxNits, Policy::MaxMaxNits);
 			} else if (result.retryable && ++self->ctlAttempts < RetryMaxCount) {
 				// Keep the display and the busy flag: nobody else is probed meanwhile, this one is tried again.
 				uint32_t delayMs = self->ctlAttempts < RetryFastCount ? RetryFastMs : RetrySlowMs;
@@ -244,19 +239,6 @@ void AuxDimCore::probeEntry(thread_call_param_t param0, thread_call_param_t) {
 			}
 		}
 
-		// Arm the write test on the first display that has something to test.
-		if (writable && self->testEnabled && !self->testStarted) {
-			self->testStarted = true;
-			display->retain();
-			self->testDisplay = display;
-			self->testStage = 0;
-			AuxDimProbe::publishf("test-armed", "Intel nits sweep in %u s%s; uptime now %us",
-								 self->testDelaySeconds,
-								 self->testVesa ? ", VESA sweep a minute later" : " (VESA sweep not requested)",
-								 AuxDimProbe::uptimeSeconds());
-			self->armTest(self->testDelaySeconds);
-		}
-
 		if (!retrying)
 			display->release();
 	}
@@ -265,43 +247,17 @@ void AuxDimCore::probeEntry(thread_call_param_t param0, thread_call_param_t) {
 		self->probeBusy = 0;
 }
 
-void AuxDimCore::armTest(uint32_t seconds) {
-	uint64_t deadline = 0;
-	clock_interval_to_deadline(seconds, kSecondScale, &deadline);
-	thread_call_enter_delayed(testCall, deadline);
-}
-
-void AuxDimCore::testEntry(thread_call_param_t param0, thread_call_param_t) {
-	auto *self = static_cast<AuxDimCore *>(param0);
-
-	IOService *display = self->testDisplay;
-	if (!display)
-		return;
-
-	uint32_t stage = self->testStage++;
-	if (stage == 0) {
-		AuxDimTest::run(display, AuxDimTest::Backend::Intel);
-		if (self->testVesa) {
-			self->armTest(TestGapSeconds);
-			return;
-		}
-		AuxDimProbe::publish("test-armed", "done");
-		self->testDisplay = nullptr;
-		display->release();
-		return;
-	}
-
-	AuxDimTest::run(display, AuxDimTest::Backend::Vesa);
-	AuxDimProbe::publish("test-armed", "done");
-	self->testDisplay = nullptr;
-	display->release();
-}
-
 void AuxDimCore::statusEntry(thread_call_param_t param0, thread_call_param_t) {
+	// Counters, refreshed after every slider move: properties only, no log lines.
 	auto *self = static_cast<AuxDimCore *>(param0);
-	AuxDimProbe::publishf("brightness-events", "%u", self->brightnessEvents);
-	AuxDimProbe::publishf("brightness-last", "brightness=%u linear-brightness=%u uptime=%us",
+	AuxDimProbe::statusf("brightness-events", "%u", self->brightnessEvents);
+	AuxDimProbe::statusf("brightness-last", "brightness=%u linear-brightness=%u uptime=%us",
 						 self->lastBrightness, self->lastLinearBrightness, AuxDimProbe::uptimeSeconds());
-	if (self->ctlEnabled)
-		AuxDimProbe::publishf("ctl-range-misses", "%u", self->ctlRangeMisses);
+	if (self->powerEvents)
+		AuxDimProbe::statusf("power-last", "dsyp=%u events=%u uptime=%us", self->lastPower, self->powerEvents,
+							 AuxDimProbe::uptimeSeconds());
+	if (self->ctlEnabled) {
+		AuxDimProbe::statusf("ctl-range-misses", "%u", self->ctlRangeMisses);
+		AuxDimProbe::statusf("ctl-foreign", "%u", self->controller.foreignRequests());
+	}
 }

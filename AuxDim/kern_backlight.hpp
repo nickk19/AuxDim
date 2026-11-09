@@ -26,10 +26,15 @@
 namespace Backlight {
 
 	static constexpr uint32_t IntelCapsAddress       {0x340}; // version, caps 1, caps 2, caps 3, control (0x344)
+	static constexpr uint32_t IntelControlAddress    {0x344}; // mode bits, see IntelBrightnessAuxEnable
 	static constexpr uint32_t IntelNitsAddress       {0x354}; // level LSB, MSB, delay frames, per frame steps
 	static constexpr uint32_t VesaEdpAddress         {0x700}; // eDP revision, general caps, backlight adjustment caps
 	static constexpr uint32_t VesaControlAddress     {0x720}; // display control, mode set, level MSB (0x722), LSB (0x723)
 	static constexpr uint32_t VesaBrightnessAddress  {0x722};
+
+	// 0x344 bit 4 (INTEL_EDP_HDR_TCON_BRIGHTNESS_AUX_ENABLE in Linux): the panel takes its level from 0x354. While it is clear
+	// the level register is ignored.
+	static constexpr uint8_t IntelBrightnessAuxEnable {0x10};
 
 	/**
 	 *  What a panel advertises and what is currently programmed. Every field is "false/0" when the
@@ -42,7 +47,7 @@ namespace Backlight {
 		bool intelNits {false};         // version >= 1 and the nits brightness capability bit
 		bool intelSdrAux {false};       // SDR brightness is set through AUX (and not through the PWM pin)
 		uint8_t intelControl {0};       // 0x344
-		bool intelNitsEnabled {false};  // the nits/AUX brightness enable bit of 0x344 is set
+		bool intelNitsEnabled {false};  // 0x344 bit 4 (IntelBrightnessAuxEnable): the panel takes its level from 0x354
 		bool haveIntelLevel {false};
 		uint16_t intelLevel {0};        // 0x354/0x355
 
@@ -67,9 +72,9 @@ namespace Backlight {
 	 *  Level registers. The VESA level is 16 bit when twoBytes is set, 8 bit otherwise.
 	 */
 	IOReturn readIntel(IOI2CInterface *aux, uint16_t &level);
+	IOReturn readIntelControl(IOI2CInterface *aux, uint8_t &control);
 	IOReturn writeIntel(IOI2CInterface *aux, uint16_t level);
 	IOReturn readVesa(IOI2CInterface *aux, bool twoBytes, uint16_t &level);
-	IOReturn writeVesa(IOI2CInterface *aux, bool twoBytes, uint16_t level);
 }
 
 #endif /* kern_backlight_hpp */

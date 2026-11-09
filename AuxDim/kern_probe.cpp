@@ -36,6 +36,16 @@ void AuxDimProbe::publishf(const char *key, const char *format, ...) {
 	publish(key, line);
 }
 
+void AuxDimProbe::statusf(const char *key, const char *format, ...) {
+	char line[240];
+	va_list va;
+	va_start(va, format);
+	vsnprintf(line, sizeof(line), format, va);
+	va_end(va);
+	if (ADDPR(selfInstance))
+		ADDPR(selfInstance)->setProperty(key, line);
+}
+
 uint32_t AuxDimProbe::uptimeSeconds() {
 	uint64_t ns = 0;
 	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
@@ -291,16 +301,14 @@ bool AuxDimProbe::run(IOService *display, Result *result) {
 				else if (!caps.intelSdrAux)
 					result->reason = "the panel does not accept Intel brightness over AUX";
 				else if (!caps.intelNitsEnabled)
-					result->reason = "the Intel nits mode is not enabled (DPCD 0x344 bit 4 is clear)";
+					result->reason = "brightness through AUX is not enabled (DPCD 0x344 bit 4 is clear)";
 				else
 					result->reason = "the Intel nits level could not be read";
 
-				result->writable = writable;
 				result->intelUsable = intelUsable;
-				// The panel reads back one nit less than it was given, so the level found at boot (399) stands for
-				// the EDID's 400. Trust the EDID when it is plausible, otherwise the level plus that one nit.
-				result->maxNits = (haveLum && lum.average >= 100 && lum.average <= 1000)
-					? lum.average : static_cast<uint32_t>(caps.intelLevel) + 1;
+				// The level found in the panel is not a maximum (the firmware may have left it anywhere), so the top
+				// of the range only ever comes from the EDID or from the user, see Policy::maxNitsFor.
+				result->edidMaxNits = haveLum ? lum.average : 0;
 			}
 		} else if (result) {
 			// Nothing answered. Typically kIOReturnOffline (0xe00002d7) while the panel is not up yet.

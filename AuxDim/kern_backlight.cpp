@@ -14,14 +14,11 @@
 namespace {
 
 	/**
-	 *  The single gate for writes. Only the two level registers pass.
+	 *  The single gate for writes. Only the Intel level block passes: 0x354...0x357 (level LSB, MSB, then the
+	 *  transition delay and step registers, written as zero), the exact transaction the Linux driver makes.
 	 */
 	bool writeAllowed(uint32_t address, uint32_t length) {
-		if (address == Backlight::IntelNitsAddress)
-			return length == 4;
-		if (address == Backlight::VesaBrightnessAddress)
-			return length == 1 || length == 2;
-		return false;
+		return address == Backlight::IntelNitsAddress && length == 4;
 	}
 
 	IOReturn guardedWrite(IOI2CInterface *aux, uint32_t address, const uint8_t *data, uint32_t length) {
@@ -41,6 +38,10 @@ IOReturn Backlight::readIntel(IOI2CInterface *aux, uint16_t &level) {
 	return ret;
 }
 
+IOReturn Backlight::readIntelControl(IOI2CInterface *aux, uint8_t &control) {
+	return DPAux::read(aux, IntelControlAddress, &control, 1);
+}
+
 IOReturn Backlight::writeIntel(IOI2CInterface *aux, uint16_t level) {
 	// Same layout the Linux driver writes (intel_dp_aux_hdr_set_aux_backlight): level LSB, MSB, then 0x356
 	// (delay frames) and 0x357 (per frame steps) as zero, in a single 4 byte transaction. A first test with
@@ -58,18 +59,6 @@ IOReturn Backlight::readVesa(IOI2CInterface *aux, bool twoBytes, uint16_t &level
 	return ret;
 }
 
-IOReturn Backlight::writeVesa(IOI2CInterface *aux, bool twoBytes, uint16_t level) {
-	// MSB first, as in DP_EDP_BACKLIGHT_BRIGHTNESS_MSB/LSB.
-	uint8_t raw[2];
-	if (twoBytes) {
-		raw[0] = static_cast<uint8_t>(level >> 8);
-		raw[1] = static_cast<uint8_t>(level & 0xFF);
-		return guardedWrite(aux, VesaBrightnessAddress, raw, 2);
-	}
-	raw[0] = static_cast<uint8_t>(level & 0xFF);
-	return guardedWrite(aux, VesaBrightnessAddress, raw, 1);
-}
-
 IOReturn Backlight::readCaps(IOI2CInterface *aux, Caps &caps) {
 	caps = Caps();
 	if (!aux)
@@ -82,7 +71,7 @@ IOReturn Backlight::readCaps(IOI2CInterface *aux, Caps &caps) {
 		caps.intelNits = intel[0] >= 1 && (intel[1] & 0x10) != 0;
 		caps.intelSdrAux = (intel[2] & 0x01) != 0;
 		caps.intelControl = intel[4];
-		caps.intelNitsEnabled = (intel[4] & 0x10) != 0;
+		caps.intelNitsEnabled = (intel[4] & IntelBrightnessAuxEnable) != 0;
 		if (caps.intelNits)
 			caps.haveIntelLevel = readIntel(aux, caps.intelLevel) == kIOReturnSuccess;
 	}

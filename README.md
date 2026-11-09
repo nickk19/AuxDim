@@ -6,8 +6,8 @@ It is a [Lilu](https://github.com/acidanthera/Lilu) plugin for Hackintosh.
 
 **Status: Phase 1, first brightness control, opt-in and untested beyond the author's machine.** With `-auxdimctl` the brightness
 macOS asks for is applied to the panel through the Intel nits interface (DPCD `0x354`), which is what the Lenovo IdeaPad Slim 5 14IAH8
-panel `ATNA40CT01-0` turned out to need. Without that argument the plugin only observes and, with `-auxdimprobe` / `-auxdimtest`,
-reads and briefly dims the panel for diagnostics. Setup and what to report: [Docs/CONTROL.md](Docs/CONTROL.md).
+panel `ATNA40CT01-0` turned out to need. With `-auxdimprobe` instead it only reads the panel for diagnostics; with neither
+argument it does nothing. Setup and what to report: [Docs/CONTROL.md](Docs/CONTROL.md).
 See [Docs/ARCHITECTURE.md](Docs/ARCHITECTURE.md) for the design and the roadmap.
 
 ## Why another brightness kext
@@ -21,11 +21,11 @@ Details and caveats are in the architecture document.
 
 ## Requirements
 
-- Lilu 1.2.0 or newer, loaded before this plugin
-- macOS Catalina to Tahoe (developed against Tahoe)
+- Lilu 1.7.1 or newer, loaded before this plugin (1.7.1 is the first release that loads on macOS 26 without `-lilubetaall`);
+  built and tested with 1.7.2
+- macOS Catalina to Tahoe is the range the plugin accepts; it has only been tested on Tahoe
 - For brightness control the internal panel must show up with a brightness slider in macOS (on a Hackintosh that normally means an
   `SSDT-PNLF`, a generic one is in [Resources/ACPI](Resources/ACPI)); this plugin does not create the slider. Not needed for the probe
-  or the write test
 
 ## Boot arguments
 
@@ -35,18 +35,16 @@ Details and caveats are in the architecture document.
 | `-auxdimdbg` | Verbose logging (effective in Debug builds) |
 | `-auxdimbeta` | Allow running on macOS newer than the tested range |
 | `-auxdimprobe` | Run the read-only hardware probe, see [Docs/PROBING.md](Docs/PROBING.md) |
-| `-auxdimtest` | Implies the probe, then dims the panel briefly through the Intel nits interface and restores it, see [Docs/WRITE-TEST.md](Docs/WRITE-TEST.md) |
-| `-auxdimtestvesa` | With `-auxdimtest`, also sweeps the VESA interface a minute later |
-| `auxdimtestdelay=N` | Seconds between the probe and the first sweep (default 120, 20 to 3600) |
-| `-auxdimctl` | Implies the probe, then applies the macOS brightness to the panel (Intel nits interface), see [Docs/CONTROL.md](Docs/CONTROL.md). Ignored together with `-auxdimtest` |
+| `-auxdimctl` | Implies the probe, then applies the macOS brightness to the panel (Intel nits interface), see [Docs/CONTROL.md](Docs/CONTROL.md) |
 | `auxdimnits=N` | Implies `-auxdimctl`; sets this luminance (nits) as soon as the controller is up, until macOS sends a brightness |
-| `auxdimminnits=N` | Lowest luminance ever sent (default 10), so the slider can never produce a black screen |
+| `auxdimminnits=N` | Lowest luminance ever sent (default 10, at least 1), so the slider can never produce a black screen |
+| `auxdimmaxnits=N` | Luminance at full brightness (100 to 1000 nits) for panels whose EDID does not give it; without it such a panel is left alone |
 
 ## Install
 
 1. Download the latest release from the [Releases](../../releases) page and unzip it. There are two zips: `AuxDim-<version>-RELEASE.zip`
    for everyday use and `AuxDim-<version>-DEBUG.zip`, which adds the verbose log lines enabled by `-auxdimdbg` (use it when you report
-   a problem; the Debug build needs a Debug Lilu to show them). Prefer to compile it yourself? See *Building from source* below.
+   a problem). Prefer to compile it yourself? See *Building from source* below.
 2. Copy `AuxDim.kext` into `EFI/OC/Kexts/` and add it to `config.plist` under `Kernel -> Add`, **after Lilu**.
 3. For the slider, add `SSDT-PNLF.aml` from [Resources/ACPI](Resources/ACPI) (details and checks in [Docs/CONTROL.md](Docs/CONTROL.md)).
 4. Add `-auxdimctl` to `boot-args` and reboot. The slider in System Settings > Displays should now move the panel.
@@ -56,7 +54,7 @@ run the diagnostics (phase 0):
 
 1. Install the Debug kext as above.
 2. Boot with `-auxdimprobe`, change the brightness once, wait a few seconds.
-3. Collect the output as described in [Docs/PROBING.md](Docs/PROBING.md) and open a *Hardware report* issue.
+3. Collect the output as described in [Docs/PROBING.md](Docs/PROBING.md) and open an issue titled *Hardware report: your laptop model*.
 
 ## Building from source
 
@@ -64,21 +62,22 @@ Only the **Xcode Command Line Tools** are needed (`xcode-select --install`): cla
 `unzip`, `zip`. Xcode itself is not required and `xcodebuild` is never called.
 
 ```bash
-./bootstrap.sh        # once: fetches MacKernelSDK and the Lilu SDK into Deps/
+./bootstrap.sh                # once: fetches MacKernelSDK and the Lilu SDK into Deps/
 make doctor                   # optional: shows the toolchain and SDKs it found
 make                          # Debug build   -> build/Debug/AuxDim.kext
 make CONFIG=Release           # Release build -> build/Release/AuxDim.kext
 make dist                     # Debug and Release zips, ready to attach to a release
 make clean                    # remove build/ (the fetched SDKs in Deps/ stay)
 make distclean                # also remove the fetched SDKs (Deps/)
-./bootstrap.sh --clean   # remove only the fetched SDKs
+./bootstrap.sh --clean        # remove only the fetched SDKs
 ```
 
 Fetched dependencies live in `Deps/`, everything compiled in `build/` (including the Lilu code the plugin
 links: `plugin_start.cpp` is compiled to `build/<Configuration>/obj/`).
 
-- Build against the Lilu release you actually boot with: `LILU_VERSION=1.7.1 ./bootstrap.sh`
-  (add `--force` to replace SDKs that are already there). By default the latest release is used.
+- The SDKs are pinned: MacKernelSDK to a fixed commit and Lilu to 1.7.2, whose archive is checked against its SHA-256.
+  To build against the Lilu release you actually boot with: `LILU_VERSION=1.7.1 ./bootstrap.sh --force` (`--force`
+  replaces SDKs that are already there; other releases are not checksummed, the script says so).
 - `make V=1` prints every command. If the final link step fails, send that output in an issue. The classic linker
   is worth a try: `make LD_CLASSIC=1`.
 - `make check` only compiles (no link) with the same flags; it also works with a recent clang on Linux.
@@ -99,12 +98,11 @@ AuxDim/                    plugin sources
   kern_probe.{hpp,cpp}     read-only hardware probe, property publishing
   kern_edid.{hpp,cpp}      EDID name and HDR luminance
   kern_backlight.{hpp,cpp} the two DPCD backlight interfaces; the only write gate (level registers only)
-  kern_selftest.{hpp,cpp}  opt-in write test (-auxdimtest)
   kern_policy.hpp          brightness value -> nits mapping (pure integer maths, unit tested on a host)
   kern_control.{hpp,cpp}   brightness control: records requests in the hook, applies them from a thread call
   Info.plist.in            bundle Info.plist template (filled in by the Makefile)
   kmod_info.c.in           kernel module descriptor template (what Xcode would generate)
-Docs/                      architecture, brightness control, brightness keys, probing guide, write test
+Docs/                      architecture, brightness control, brightness keys, probing guide
 Resources/ACPI/            SSDT-PNLF (the slider); SSDT-BRTKEYS with its ACPI patches (example: brightness keys through VoodooPS2); source and compiled
 Deps/                      MacKernelSDK and Lilu SDK, fetched by bootstrap (not tracked)
 ```

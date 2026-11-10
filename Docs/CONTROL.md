@@ -1,7 +1,9 @@
 # Brightness control (Phase 1)
 
-With `-auxdimctl` the plugin applies the brightness macOS asks for to the panel, through the Intel HDR/SDR nits interface
-(DPCD `0x354`). It is opt-in, off by default, and it was written for one machine (Lenovo IdeaPad Slim 5 14IAH8, Samsung OLED
+With a backend argument the plugin applies the brightness macOS asks for to the panel, through that backend's interface:
+`-auxdimintel` uses the Intel HDR/SDR nits interface (DPCD `0x354`); `-auxdimamd` (experimental) uses AMD's backlight interface
+(DPCD `0x320`, level in millinits), the one the Linux amdgpu driver uses for OLED panels. Give exactly one; with more than one,
+control stays off. It is opt-in, off by default, and it was written for one machine (Lenovo IdeaPad Slim 5 14IAH8, Samsung OLED
 `ATNA40CT01-0`); other panels are expected to need the probe first, see [PROBING.md](PROBING.md).
 
 ## How it works
@@ -15,12 +17,17 @@ With `-auxdimctl` the plugin applies the brightness macOS asks for to the panel,
    is the EDID frame-average luminance (400 nits on this panel), the same value the Linux driver uses. Without a plausible value
    there (100 to 1000 nits) the controller stays inert unless `auxdimmaxnits=N` gives it: the level found in the panel is never
    taken as the maximum, because the firmware may have left it anywhere.
-3. The level is written as the 4 byte block `[LSB, MSB, 0, 0]` to `0x354` through the framebuffer's native AUX interface. Once the
-   slider has been still for 0.6 s the level is read back (`ctl-verify`); the panel needs that long to ramp.
+3. The level is written through the framebuffer's native AUX interface. Intel: the 4 byte block `[LSB, MSB, 0, 0]` to `0x354`.
+   AMD: the level in millinits with a 50 ms transition, 6 bytes to `0x320`, then `1` to `0x32E`, as amdgpu does. Before the first
+   write to a display the backend checks that the panel takes its level from AUX (`ctl-activate`): the Intel backend reads
+   `0x344` and never writes it, the AMD backend switches its interface on (`0x32F` = 1) if it is off, as amdgpu does when it powers
+   the panel up. Once the slider has been still for 0.6 s the level is read back (`ctl-verify`; AMD: the current average at
+   `0x32A`); the panel needs that long to ramp.
    If the write fails (framebuffer not powered yet, at boot or just after wake) the level is kept and retried after 1, 2, 4, 8 and
    16 seconds; a new request replaces it and starts the count again.
-4. The controller attaches only to a display whose Intel nits interface is advertised, enabled by the firmware and readable
-   (`intel-state` in the probe output). On any other display it stays inert and says so in `ctl-state`. Requests from other
+4. The controller attaches only to a display whose interface the probe found usable for the backend. Intel: advertised, enabled
+   by the firmware (`0x344` bit 4) and readable (`intel-state` in the probe output). AMD: brightness over AUX advertised by an OLED
+   panel (`0x317`, `amd-state`). On any other display it stays inert and says so in `ctl-state`. Requests from other
    displays are ignored (`ctl-foreign`); before the first attach, a display without a backlight (an external monitor) cannot
    displace the panel's waiting request. If the framebuffer terminates the panel's IODisplay and creates a new one, the
    controller detaches and moves to the new one as soon as the probe has vetted it (`ctl-state` says which).
@@ -29,9 +36,9 @@ With `-auxdimctl` the plugin applies the brightness macOS asks for to the panel,
    request, can hit exactly that window. In that case the probe is repeated (every 5 s for the first minute, then every
    30 s, 40 attempts in all) and the brightness macOS asked for in the meantime is applied as soon as the panel answers.
 6. When the display comes back on after having been off (the `dsyp` parameter goes from off to on; the dimming before display
-   sleep does not count), the level is written again after 0.2 s, with the same retries, once `0x344` shows that the panel still
-   takes its brightness from AUX. If that bit is clear the level is not written, since the panel would ignore it; turning the bit
-   back on is not done yet. `ctl-wake` reports either case. A display without a `dsyp` parameter gets no such restore
+   sleep does not count), the level is written again after 0.2 s, with the same retries, after the same check as before the first
+   write. Intel: if `0x344` bit 4 is clear the level is not written, since the panel would ignore it; turning the bit back on is
+   not done yet. AMD: `0x32F` is set again if the panel lost it. `ctl-wake` reports what was found. A display without a `dsyp` parameter gets no such restore
    (`power-last` never appears).
 
 The slider and the brightness keys only exist in macOS when the panel has a `backlight` device, which on this kind of machine
@@ -42,7 +49,8 @@ means [SSDT-PNLF](../Resources/ACPI). The plugin does not create it.
 1. Get the kext (a release zip, or build it with `make`, see the [README](../README.md)) and copy it into `EFI/OC/Kexts`, after Lilu.
 2. Put `Resources/ACPI/SSDT-PNLF.aml` into `EFI/OC/ACPI` and add it to `config.plist` under `ACPI -> Add`. Check first that no
    other SSDT already defines a `PNLF` / `backlight` device (`ioreg -l | grep -i -E "PNLF|backlight"`); two of them conflict.
-3. Boot arguments: `-auxdimctl` (add `-auxdimdbg` for the Debug build's logging).
+3. Boot arguments: `-auxdimintel` on Intel laptops, `-auxdimamd` (experimental) on AMD laptops whose probe shows `amd-state` with
+   `sdr-via-aux=yes` and `oled=yes` (add `-auxdimdbg` for the Debug build's logging).
 4. Reboot. The slider should now appear in System Settings > Displays and the panel should follow it.
 
 Optional: `auxdimminnits=N` for a different floor, `auxdimnits=N` to force a level at boot (useful to check the path without the slider),
@@ -60,7 +68,8 @@ ioreg -rc IODisplay -l -w0
 | `ctl-state` | `ready: ... floor...max nits ...` once attached; `waiting: ...` while the panel does not answer (with the error code and the attempt number); `inert on this display: <reason>` when it can never attach (no AUX interface, Intel nits interface not advertised, brightness through AUX not enabled in `0x344`, no luminance range in the EDID, gave up); `detached: ...` when the display went away and its replacement is not vetted yet |
 | `ctl-last` | The last applied request: parameter, value, range, resulting nits, `ret` of the write, counters |
 | `ctl-verify` | What the panel itself reports about 0.6 s after the last write (it reads one nit below the value written, that counts as "as expected") |
-| `ctl-wake` | The last wake: the value of `0x344` and whether the level was written again (or why not) |
+| `ctl-activate` | The check before the first write to a display: the backend's mode register (`0x344` for Intel, `0x32F` for AMD), whether the backend switched it on, and whether the panel takes its level from AUX |
+| `ctl-wake` | The last wake: the backend's mode register and whether the level was written again (or why not) |
 | `brightness-events`, `brightness-last` | How many brightness requests macOS sent, and the last values |
 | `power-last` | The last display power state macOS set (`dsyp`: 0 off, 1 dimmed, 2 on) and how many changes so far |
 | `ctl-range-misses` | Requests dropped because they carried no min/max. Must stay 0 |
@@ -79,5 +88,5 @@ ioreg -rc IODisplay -l -w0
 
 If the screen ever ends up too dark: the floor (10 nits unless `auxdimminnits` says otherwise) keeps it from going black, so the
 slider can still be found and moved up. A reboot alone does not help, because macOS sets its saved brightness again at boot.
-`auxdimnits=N` forces a level at boot that stays until the slider is moved; removing `-auxdimctl` (or adding `-auxdimoff`)
+`auxdimnits=N` forces a level at boot that stays until the slider is moved; removing the backend argument (or adding `-auxdimoff`)
 disables the plugin.

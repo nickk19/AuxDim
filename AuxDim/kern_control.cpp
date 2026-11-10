@@ -17,7 +17,6 @@
 #include "kern_policy.hpp"
 #include "kern_probe.hpp"
 #include "kern_dpaux.hpp"
-#include "kern_backlight.hpp"
 
 namespace {
 
@@ -36,7 +35,10 @@ namespace {
 	}
 }
 
-bool Controller::init(uint32_t forced, uint32_t floorLevel) {
+bool Controller::init(const Backend::Ops *ops, uint32_t forced, uint32_t floorLevel) {
+	if (!ops)
+		return false;
+	backend = ops;
 	forcedNits = forced;
 	floorRequested = floorLevel;
 
@@ -105,6 +107,8 @@ bool Controller::attached() {
 }
 
 void Controller::takeOver(IOService *display, uint32_t maxLevel) {
+	activated = false;
+	switchedOn = false;
 	maxNits = maxLevel;
 	// Never let the floor reach the top of the range, or zero, whatever the boot argument says.
 	floorNits = Policy::floorNitsFor(floorRequested ? floorRequested : DefaultFloorNits, maxNits);
@@ -137,8 +141,8 @@ void Controller::takeOver(IOService *display, uint32_t maxLevel) {
 	__sync_synchronize();
 	ready = true;
 
-	AuxDimProbe::publishf("ctl-state", "ready: Intel nits interface, %u...%u nits, forced level %u, brightness request already waiting: %s%s",
-						 floorNits, maxNits, forced ? forcedNits : 0, (backlog && !forced) ? "yes" : "no",
+	AuxDimProbe::publishf("ctl-state", "ready: %s, %u...%u nits, forced level %u, brightness request already waiting: %s%s",
+						 backend->name, floorNits, maxNits, forced ? forcedNits : 0, (backlog && !forced) ? "yes" : "no",
 						 detaches ? ", on the display that replaced the previous one" : "");
 }
 
@@ -156,6 +160,8 @@ void Controller::detach() {
 	desiredPending = false;
 	forcedPending = false;
 	attempts = 0;
+	activated = false;
+	switchedOn = false;
 	wakeCheck = false;
 	detaches++;
 	AuxDimProbe::publishf("ctl-state", "detached: the display went away (%u so far), waiting for its replacement", detaches);
@@ -347,7 +353,7 @@ void Controller::apply() {
 
 	if (wake) {
 		// The panel kept its level across display sleep in every test so far, but nothing guarantees it (deeper sleep states,
-		// other firmware): write it again, with a fresh retry budget, once 0x344 shows the panel still listens to AUX.
+		// other firmware): write it again, with a fresh retry budget, once the backend confirms the panel still listens to AUX.
 		wakes++;
 		if (desiredPending || lastNits) {
 			if (!desiredPending)
@@ -366,31 +372,42 @@ void Controller::apply() {
 
 	// The range keeps every level well inside the 16 bit register (Policy::MaxMaxNits).
 	const uint32_t nits = desiredNits;
+	const bool activating = !activated || wakeCheck;
 	IOReturn writeRet = kIOReturnNotAttached;
-	uint8_t control = 0;
-	bool auxOff = false;
+	uint8_t mode = 0;
+	bool switched = false;
+	bool on = true;
 	IOLockLock(auxLock);
 	if (IOI2CInterface *bus = currentAux()) {
-		writeRet = kIOReturnSuccess;
-		if (wakeCheck) {
-			writeRet = Backlight::readIntelControl(bus, control);
-			auxOff = writeRet == kIOReturnSuccess && (control & Backlight::IntelBrightnessAuxEnable) == 0;
-		}
-		if (writeRet == kIOReturnSuccess && !auxOff)
-			writeRet = Backlight::writeIntel(bus, static_cast<uint16_t>(nits));
+		writeRet = activating ? backend->activate(bus, mode, switched, on) : kIOReturnSuccess;
+		if (writeRet == kIOReturnSuccess && on)
+			writeRet = backend->write(bus, nits);
 	}
 	// The framebuffer may have replaced its interfaces (a wake that failed, a reconfiguration): look again next time.
 	if (writeRet != kIOReturnSuccess)
 		dropAux();
 	IOLockUnlock(auxLock);
+	if (switched && !switchedOn) {
+		switchedOn = true;
+		switchedFrom = mode;
+	}
+	if (switchedOn)
+		mode = switchedFrom;
 
-	if (auxOff) {
-		// The panel came back in another brightness mode and ignores 0x354 now. Switching AUX brightness back on is a write
-		// to 0x344 that this version does not make: report it and leave the panel alone.
+	if (!on) {
+		// The panel does not take its level from this interface (any more), and this backend may not switch it on: report it
+		// and leave the panel alone. The next request checks again.
 		desiredPending = false;
-		wakeCheck = false;
-		AuxDimProbe::publishf("ctl-wake", "uptime %us: wake %u, 0x344 = 0x%02x: brightness through AUX is off, %u nits not written",
-							 AuxDimProbe::uptimeSeconds(), wakes, control, nits);
+		activated = false;
+		switchedOn = false;
+		if (wakeCheck) {
+			wakeCheck = false;
+			AuxDimProbe::publishf("ctl-wake", "uptime %us: wake %u, %s = 0x%02x: brightness through AUX is off, %u nits not written",
+								 AuxDimProbe::uptimeSeconds(), wakes, backend->modeRegister, mode, nits);
+		} else {
+			AuxDimProbe::publishf("ctl-activate", "uptime %us: %s = 0x%02x: brightness through AUX is off, %u nits not written",
+								 AuxDimProbe::uptimeSeconds(), backend->modeRegister, mode, nits);
+		}
 		return;
 	}
 
@@ -400,6 +417,10 @@ void Controller::apply() {
 		desiredPending = false;
 		attempts = 0;
 		lastNits = nits;
+		if (activating && !wakeCheck)
+			AuxDimProbe::publishf("ctl-activate", "uptime %us: %s = 0x%02x%s", AuxDimProbe::uptimeSeconds(),
+								 backend->modeRegister, mode, switchedOn ? ", switched on" : "");
+		activated = true;
 
 		// The panel needs a moment to ramp, an immediate read shows the old level. Check once things have been quiet:
 		// every new write pushes this call back.
@@ -409,9 +430,11 @@ void Controller::apply() {
 
 		if (wakeCheck) {
 			wakeCheck = false;
-			AuxDimProbe::publishf("ctl-wake", "uptime %us: wake %u, 0x344 = 0x%02x, %u nits written",
-								 AuxDimProbe::uptimeSeconds(), wakes, control, nits);
+			AuxDimProbe::publishf("ctl-wake", "uptime %us: wake %u, %s = 0x%02x%s, %u nits written",
+								 AuxDimProbe::uptimeSeconds(), wakes, backend->modeRegister, mode,
+								 switchedOn ? " (switched on)" : "", nits);
 		}
+		switchedOn = false;
 	} else {
 		failures++;
 		// Most likely the framebuffer is not powered yet (boot, wake): keep the level and try again, waiting longer
@@ -455,13 +478,13 @@ void Controller::verify() {
 		return;
 
 	const uint32_t expected = lastNits;
-	uint16_t level = 0;
+	uint32_t level = 0;
 	IOReturn ret = kIOReturnSuccess;
 	bool found = false;
 	IOLockLock(auxLock);
 	if (IOI2CInterface *bus = currentAux()) {
 		found = true;
-		ret = Backlight::readIntel(bus, level);
+		ret = backend->read(bus, level);
 		if (ret != kIOReturnSuccess)
 			dropAux();
 	}
@@ -469,7 +492,7 @@ void Controller::verify() {
 	if (!found)
 		return;
 
-	// This panel reports one nit below what it was given, so one either way is as expected.
+	// The Intel panel reports one nit below what it was given, so one either way is as expected.
 	uint32_t difference = level > expected ? level - expected : expected - level;
 	AuxDimProbe::statusf("ctl-verify", "uptime %us: wrote %u nits, the panel reports %u (ret 0x%x): %s",
 			  AuxDimProbe::uptimeSeconds(), expected, level, ret,

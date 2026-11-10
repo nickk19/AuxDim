@@ -2,7 +2,7 @@
 //  kern_control.hpp
 //  AuxDim
 //
-//  Phase 1: applies the brightness macOS asks for to the panel, through the Intel nits interface.
+//  Phase 1: applies the brightness macOS asks for to the panel, through the backend it was given (kern_backend.hpp).
 //
 //  Input comes from the IODisplay::doIntegerSet hook, which runs with the framebuffer lock held, so
 //  request() only records the value. A thread call does the AUX I/O: it is throttled (at most one pass
@@ -11,7 +11,7 @@
 //  on after being off, the level is written again. If the IODisplay the controller drives is terminated (the framebuffer
 //  replaced it), the controller moves to its replacement once the probe has vetted it.
 //
-//  Enabled with -auxdimctl (or auxdimnits=N).
+//  Enabled by a backend argument (-auxdimintel, -auxdimamd, see kern_backend.hpp).
 //
 //  Copyright © 2026 nickk19. All rights reserved.
 //  Licensed under the BSD 3-Clause License, see LICENSE.
@@ -27,18 +27,21 @@
 #include <IOKit/i2c/IOI2CInterface.h>
 #include <kern/thread_call.h>
 
+#include "kern_backend.hpp"
+
 class Controller {
 public:
 	/**
+	 *  @param backend     how to talk to the panel, see kern_backend.hpp
 	 *  @param forcedNits  if not zero, applied once as soon as the controller is up (boot argument auxdimnits)
 	 *  @param floorNits   lowest luminance ever sent (boot argument auxdimminnits)
 	 *
 	 *  @return false when the thread call or the lock could not be allocated
 	 */
-	bool init(uint32_t forcedNits, uint32_t floorNits);
+	bool init(const Backend::Ops *backend, uint32_t forcedNits, uint32_t floorNits);
 
 	/**
-	 *  Offer a display whose Intel nits interface the probe found usable. Runs on the probe thread.
+	 *  Offer a display whose interface the probe found usable for the backend. Runs on the probe thread.
 	 *
 	 *  The next pass of the apply thread takes it over and applies the request macOS made before this point (typically the
 	 *  saved brightness at boot). While another display is being driven, the offer is kept as the spare that replaces it
@@ -74,8 +77,8 @@ public:
 
 	/**
 	 *  Record a display power change (the `dsyp` parameter: off, dimmed, on). Called from the hook: does not block, does no I/O.
-	 *  When the display is on again after having been off, the level it should have is written again, after checking that
-	 *  the panel still takes its brightness from AUX (0x344); the result is published as ctl-wake.
+	 *  When the display is on again after having been off, the level it should have is written again, after the backend has
+	 *  checked that the panel still takes its brightness from AUX (Backend::Ops::activate); the result is published as ctl-wake.
 	 */
 	void powerState(IOService *display, uint32_t state);
 
@@ -93,6 +96,8 @@ private:
 		uint32_t min {0};
 		uint32_t max {0};
 	};
+
+	const Backend::Ops *backend {nullptr};
 
 	IOSimpleLock *lock {nullptr};
 	thread_call_t applyCall {nullptr};
@@ -139,7 +144,10 @@ private:
 	uint32_t writes {0};
 	uint32_t failures {0};
 	volatile uint32_t lastNits {0};  // last level written successfully, what verify() expects the panel to report
-	bool wakeCheck {false};          // read 0x344 before the next write, then report it as ctl-wake
+	bool activated {false};          // the backend has confirmed its interface on the target (activate)
+	bool switchedOn {false};         // an activation switched the interface on, not reported yet (the write may have failed)
+	uint8_t switchedFrom {0};        // the mode register before that
+	bool wakeCheck {false};          // activate again before the next write, then report it as ctl-wake
 	uint32_t wakes {0};
 
 	// What desiredNits came from, for the status line

@@ -4,10 +4,11 @@ GPU-agnostic brightness control for displays that macOS cannot dim through the u
 OLED eDP panels dimmed over the DisplayPort AUX channel, and (later) external monitors dimmed over DDC/CI.
 It is a [Lilu](https://github.com/acidanthera/Lilu) plugin for Hackintosh.
 
-**Status: Phase 1, first brightness control, opt-in and untested beyond the author's machine.** With `-auxdimctl` the brightness
-macOS asks for is applied to the panel through the Intel nits interface (DPCD `0x354`), which is what the Lenovo IdeaPad Slim 5 14IAH8
-panel `ATNA40CT01-0` turned out to need. With `-auxdimprobe` instead it only reads the panel for diagnostics; with neither
-argument it does nothing. Setup and what to report: [Docs/CONTROL.md](Docs/CONTROL.md).
+**Status: Phase 1, first brightness control, opt-in and untested beyond the author's machine.** Brightness control goes through a
+backend, chosen with its boot argument: `-auxdimintel` applies the brightness macOS asks for through the Intel nits interface (DPCD
+`0x354`), which is what the Lenovo IdeaPad Slim 5 14IAH8 panel `ATNA40CT01-0` turned out to need; `-auxdimamd` (experimental)
+does the same through AMD's backlight interface, the one the Linux amdgpu driver uses for OLED panels. With `-auxdimprobe` instead
+the plugin only reads the panel for diagnostics; with neither it does nothing. Setup and what to report: [Docs/CONTROL.md](Docs/CONTROL.md).
 See [Docs/ARCHITECTURE.md](Docs/ARCHITECTURE.md) for the design and the roadmap.
 
 ## Why another brightness kext
@@ -35,10 +36,14 @@ Details and caveats are in the architecture document.
 | `-auxdimdbg` | Verbose logging (effective in Debug builds) |
 | `-auxdimbeta` | Allow running on macOS newer than the tested range |
 | `-auxdimprobe` | Run the read-only hardware probe, see [Docs/PROBING.md](Docs/PROBING.md) |
-| `-auxdimctl` | Implies the probe, then applies the macOS brightness to the panel (Intel nits interface), see [Docs/CONTROL.md](Docs/CONTROL.md) |
-| `auxdimnits=N` | Implies `-auxdimctl`; sets this luminance (nits) as soon as the controller is up, until macOS sends a brightness |
+| `-auxdimintel` | Backend: applies the macOS brightness through the Intel nits interface (implies the probe), see [Docs/CONTROL.md](Docs/CONTROL.md) |
+| `-auxdimamd` | Backend, experimental: the same through AMD's backlight interface (DPCD `0x320`), as amdgpu drives OLED panels; it switches that interface on itself (`0x32F`). Not yet tested from macOS |
+| `auxdimnits=N` | Sets this luminance (nits) as soon as the controller is up, until macOS sends a brightness |
 | `auxdimminnits=N` | Lowest luminance ever sent (default 10, at least 1), so the slider can never produce a black screen |
 | `auxdimmaxnits=N` | Luminance at full brightness (100 to 1000 nits) for panels whose EDID does not give it; without it such a panel is left alone |
+
+Give exactly one backend argument: with more than one, control stays off and `ctl-state` says so. `auxdimnits`, `auxdimminnits`
+and `auxdimmaxnits` only apply together with a backend.
 
 ## Install
 
@@ -47,7 +52,7 @@ Details and caveats are in the architecture document.
    a problem). Prefer to compile it yourself? See *Building from source* below.
 2. Copy `AuxDim.kext` into `EFI/OC/Kexts/` and add it to `config.plist` under `Kernel -> Add`, **after Lilu**.
 3. For the slider, add `SSDT-PNLF.aml` from [Resources/ACPI](Resources/ACPI) (details and checks in [Docs/CONTROL.md](Docs/CONTROL.md)).
-4. Add `-auxdimctl` to `boot-args` and reboot. The slider in System Settings > Displays should now move the panel.
+4. Add the backend argument (`-auxdimintel`, or `-auxdimamd` on AMD) to `boot-args` and reboot. The slider in System Settings > Displays should now move the panel.
 
 Brightness control is described in [Docs/CONTROL.md](Docs/CONTROL.md). To find out what your panel supports before enabling it,
 run the diagnostics (phase 0):

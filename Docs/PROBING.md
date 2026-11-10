@@ -8,7 +8,7 @@ The probe answers four questions about your machine, none of which can be guesse
 4. What are the display's identity (EDID) and the range macOS uses for brightness?
 
 The probe only **reads**. It never writes to the panel or to any register. The only part of the plugin that writes is brightness
-control (`-auxdimctl`, see [CONTROL.md](CONTROL.md)), and it writes only the brightness level.
+control (a backend argument such as `-auxdimintel`, see [CONTROL.md](CONTROL.md)), and it writes only the registers of its backend.
 
 ## Steps
 
@@ -50,8 +50,9 @@ Properties on `AuxDim`:
 | `framebuffer-class` | The driver class owning the panel |
 | `aux-interface-N` | One line per IOI2C interface. Bit 4 of `transaction-types` (`0x10`) is the native AUX transaction, `native-aux=yes` is what the plugin needs. `bus-type` is informative only (Apple's Intel framebuffer reports `1`, plain I2C, even for DisplayPort) |
 | `dpcd-0000` ... `dpcd-0720` | Raw DPCD bytes, see below |
-| `intel-state`, `vesa-state` | The two backlight interfaces decoded: capability bits, mode, enable state and the level currently programmed |
-| `hint-backlight` | One line summary of the two above; the raw bytes are authoritative |
+| `intel-state`, `vesa-state`, `amd-state` | The backlight interfaces decoded: capability bits, mode, enable state and the level currently programmed (AMD: in millinits, with the level the panel reports) |
+| `source-oui` | The source OUI at `0x300`, which tells which GPU driver last wrote it (`AMD`, `Intel`, or `none written`) |
+| `hint-backlight` | One line summary of the interfaces; the raw bytes are authoritative |
 | `brightness-events`, `brightness-last` | How many brightness requests reached the hook and the last values, with uptime. Needs the display to have a brightness parameter (SSDT-PNLF) |
 
 DPCD ranges read (hex bytes, first byte at the listed address):
@@ -59,7 +60,7 @@ DPCD ranges read (hex bytes, first byte at the listed address):
 | Address | Content |
 |---|---|
 | `0x000` | DPCD revision, max link rate, max lane count, ... |
-| `0x300` | Source OUI last written by the GPU driver |
+| `0x300` | Source OUI last written by the GPU driver (`0x300`-`0x302`), then AMD's backlight registers: panel caps (`0x317`), level in millinits and transition (`0x320`), current peak and average (`0x326`, `0x32A`), control (`0x32E`), enable (`0x32F`) |
 | `0x340` | Intel HDR/SDR TCON capabilities and control (`0x344`), nits brightness (`0x354`) |
 | `0x400` | Sink OUI and device identification string (panel TCON vendor) |
 | `0x700` | eDP revision (`0x700`), general capability (`0x701`), backlight adjustment capability (`0x702`) |

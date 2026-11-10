@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+#### Added
+- The probe also reads `0x300`-`0x32F`: the source OUI (`source-oui`, decoded as AMD, Intel or none) and AMD's backlight registers
+  (`amd-state`: panel caps at `0x317`, level in millinits at `0x320`, current level at `0x326`/`0x32A`, control and enable at
+  `0x32E`/`0x32F`). Still reads only.
+- `-auxdimamd`, an experimental backend for AMD's backlight interface, the one the Linux amdgpu driver uses for OLED panels: it
+  switches the interface on (`0x32F`), writes the level in millinits to `0x320` and sets `0x32E`, and reads the current level back
+  from `0x32A`. Only for OLED panels that advertise it (`0x317`). Modelled on a Linux register dump of an ASUS UM325U with a Samsung
+  `ATNA33XC11-0` (issue #1), not yet tested from macOS.
+
+#### Changed
+- The panel I/O is split into backends (`kern_backend_*.cpp`), each with its own list of registers it may write; the controller
+  talks to the panel only through the backend it was given. Before the first write to a display the backend checks that the
+  panel takes its level from AUX, and `ctl-activate` reports what it found.
+- Brightness control is enabled by choosing a backend with its own boot argument: `-auxdimintel` for the Intel nits interface.
+  Exactly one may be given; with more than one, control stays off and `ctl-state` says why. `auxdimnits` no longer enables control
+  by itself: it, `auxdimminnits` and `auxdimmaxnits` only apply together with a backend.
+
+#### Removed
+- `-auxdimctl`: replaced by `-auxdimintel`.
+
 ## 0.2.0 - 2026-11-09
 
 #### Added

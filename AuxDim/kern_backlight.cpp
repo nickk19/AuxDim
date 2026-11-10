@@ -11,25 +11,6 @@
 #include "kern_backlight.hpp"
 #include "kern_dpaux.hpp"
 
-namespace {
-
-	/**
-	 *  The single gate for writes. Only the Intel level block passes: 0x354...0x357 (level LSB, MSB, then the
-	 *  transition delay and step registers, written as zero), the exact transaction the Linux driver makes.
-	 */
-	bool writeAllowed(uint32_t address, uint32_t length) {
-		return address == Backlight::IntelNitsAddress && length == 4;
-	}
-
-	IOReturn guardedWrite(IOI2CInterface *aux, uint32_t address, const uint8_t *data, uint32_t length) {
-		if (!writeAllowed(address, length)) {
-			SYSLOG("auxdim", "refusing DPCD write to 0x%x (%u bytes)", address, length);
-			return kIOReturnNotPermitted;
-		}
-		return DPAux::write(aux, address, data, length);
-	}
-}
-
 IOReturn Backlight::readIntel(IOI2CInterface *aux, uint16_t &level) {
 	uint8_t raw[2] = {};
 	IOReturn ret = DPAux::read(aux, IntelNitsAddress, raw, sizeof(raw));
@@ -40,14 +21,6 @@ IOReturn Backlight::readIntel(IOI2CInterface *aux, uint16_t &level) {
 
 IOReturn Backlight::readIntelControl(IOI2CInterface *aux, uint8_t &control) {
 	return DPAux::read(aux, IntelControlAddress, &control, 1);
-}
-
-IOReturn Backlight::writeIntel(IOI2CInterface *aux, uint16_t level) {
-	// Same layout the Linux driver writes (intel_dp_aux_hdr_set_aux_backlight): level LSB, MSB, then 0x356
-	// (delay frames) and 0x357 (per frame steps) as zero, in a single 4 byte transaction. A first test with
-	// only the two level bytes was acknowledged by the panel but had no effect.
-	const uint8_t raw[4] = { static_cast<uint8_t>(level & 0xFF), static_cast<uint8_t>(level >> 8), 0, 0 };
-	return guardedWrite(aux, IntelNitsAddress, raw, sizeof(raw));
 }
 
 IOReturn Backlight::readVesa(IOI2CInterface *aux, bool twoBytes, uint16_t &level) {
@@ -89,9 +62,31 @@ IOReturn Backlight::readCaps(IOI2CInterface *aux, Caps &caps) {
 	if (caps.haveVesa && DPAux::read(aux, VesaControlAddress, ctl, sizeof(ctl)) == kIOReturnSuccess) {
 		caps.vesaEnabled = (ctl[0] & 0x01) != 0;
 		caps.vesaMode = ctl[1] & 0x03;
+		caps.vesaLuminanceControl = (ctl[1] & 0x80) != 0;
 		if (caps.vesaAux)
 			caps.haveVesaLevel = readVesa(aux, caps.vesaTwoBytes, caps.vesaLevel) == kIOReturnSuccess;
 	}
 
-	return (caps.haveIntel || caps.haveVesa) ? kIOReturnSuccess : kIOReturnIOError;
+	uint8_t amd[0x30] = {}; // 0x300...0x32F
+	if (DPAux::read(aux, SourceOuiAddress, amd, sizeof(amd)) == kIOReturnSuccess) {
+		auto le32 = [&amd](uint32_t address) {
+			const uint8_t *p = amd + (address - SourceOuiAddress);
+			return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) | (static_cast<uint32_t>(p[2]) << 16) |
+				(static_cast<uint32_t>(p[3]) << 24);
+		};
+		caps.haveAmd = true;
+		caps.sourceOui[0] = amd[0];
+		caps.sourceOui[1] = amd[1];
+		caps.sourceOui[2] = amd[2];
+		caps.amdCaps = amd[AmdSinkCapsAddress - SourceOuiAddress];
+		caps.amdLevel = le32(AmdLevelAddress);
+		caps.amdTransitionMs = static_cast<uint16_t>(amd[AmdLevelAddress + 4 - SourceOuiAddress] |
+													 (amd[AmdLevelAddress + 5 - SourceOuiAddress] << 8));
+		caps.amdPeak = le32(AmdCurrentAddress);
+		caps.amdAverage = le32(AmdCurrentAddress + 4);
+		caps.amdControl = amd[AmdControlAddress - SourceOuiAddress];
+		caps.amdEnable = amd[AmdEnableAddress - SourceOuiAddress];
+	}
+
+	return (caps.haveIntel || caps.haveVesa || caps.haveAmd) ? kIOReturnSuccess : kIOReturnIOError;
 }

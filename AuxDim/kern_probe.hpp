@@ -18,7 +18,7 @@
 
 #include <IOKit/IOService.h>
 
-#include "kern_backlight.hpp"
+#include "kern_backend.hpp"
 #include "kern_edid.hpp"
 
 namespace AuxDimProbe {
@@ -27,10 +27,10 @@ namespace AuxDimProbe {
 	 *  What the probe learned that the rest of the plugin acts on.
 	 */
 	struct Result {
-		bool intelUsable {false};  // Intel nits interface advertised, SDR through AUX, enabled, level readable
+		bool usable {false};       // the panel offers the backend's interface (Backend::Ops::usable)
 		uint32_t edidMaxNits {0};  // EDID frame-average luminance, 0 when absent (see Policy::maxNitsFor)
 
-		// Why intelUsable is false. The reads failing with "offline" is what the framebuffer answers while the panel is
+		// Why usable is false. The reads failing with "offline" is what the framebuffer answers while the panel is
 		// not up yet (seen right at boot), so that case is worth another try later; the others are final.
 		bool retryable {false};
 		const char *reason {"not probed"};
@@ -41,12 +41,13 @@ namespace AuxDimProbe {
 	 *  Probe a display. Blocking, takes the framebuffer lock via the AUX interface,
 	 *  therefore it must run on its own thread, never inside an IODisplay callback.
 	 *
-	 *  @param result  optional, filled with what the plugin needs to decide what to do next
+	 *  @param result   optional, filled with what the plugin needs to decide what to do next
+	 *  @param backend  the backend result->usable is about; none in probe-only mode
 	 *
 	 *  @return true when the display has a native AUX interface and advertises at least one backlight
 	 *          interface
 	 */
-	bool run(IOService *display, Result *result = nullptr);
+	bool run(IOService *display, Result *result = nullptr, const Backend::Ops *backend = nullptr);
 
 	/**
 	 *  Log a line and expose it as a property of the plugin service, so results can be collected without

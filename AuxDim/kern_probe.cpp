@@ -161,14 +161,14 @@ namespace {
 
 	// All reads. Keep this list in sync with Docs/PROBING.md.
 	//   0x000  receiver capability (DPCD revision, link rate, lane count)
-	//   0x300  source OUI as last written by the GPU driver
+	//   0x300  source OUI as last written by the GPU driver, then AMD's backlight registers (0x317, 0x320-0x32F)
 	//   0x340  Intel HDR / SDR TCON capabilities, control and nits brightness (0x354)
 	//   0x400  sink OUI and device identification string
 	//   0x700  eDP capability (revision, general capability, backlight adjustment capability)
 	//   0x720  eDP backlight control (display control, mode, brightness MSB/LSB, PWM generator)
 	const DpcdRange dpcdRanges[] = {
 		{ 0x000, 16 },
-		{ 0x300, 16 },
+		{ 0x300, 48 },
 		{ 0x340, 32 },
 		{ 0x400, 16 },
 		{ 0x700, 16 },
@@ -177,8 +177,8 @@ namespace {
 
 	void dumpDpcd(IOI2CInterface *aux) {
 		for (const auto &range : dpcdRanges) {
-			uint8_t buffer[32] = {};
-			char key[24], hex[128];
+			uint8_t buffer[48] = {};
+			char key[24], hex[160];
 			snprintf(key, sizeof(key), "dpcd-%04x", range.address);
 
 			IOReturn ret = DPAux::read(aux, range.address, buffer, range.length);
@@ -207,8 +207,18 @@ namespace {
 		return value ? "yes" : "no";
 	}
 
+	const char *ouiName(const uint8_t oui[3]) {
+		if (oui[0] == 0x00 && oui[1] == 0x00 && oui[2] == 0x1a)
+			return "AMD";
+		if (oui[0] == 0x00 && oui[1] == 0xaa && oui[2] == 0x01)
+			return "Intel";
+		if (oui[0] == 0x00 && oui[1] == 0x00 && oui[2] == 0x00)
+			return "none written";
+		return "unknown";
+	}
+
 	/**
-	 *  Decoded view of the two backlight interfaces (cf. Linux drm_dp_helper.h and intel_dp_aux_backlight.c).
+	 *  Decoded view of the backlight interfaces (cf. Linux drm_dp_helper.h, intel_dp_aux_backlight.c, amdgpu).
 	 *  The raw dpcd-XXXX bytes stay authoritative.
 	 */
 	void describeCaps(const Backlight::Caps &caps) {
@@ -231,16 +241,31 @@ namespace {
 			publish("vesa-state", "unreadable");
 		}
 
-		publishf("hint-backlight", "vesa-aux-set:%s vesa-pwm-pin:%s vesa-mode:%s intel-hdr-nits:%s intel-sdr-aux:%s",
+		if (caps.haveAmd) {
+			publishf("source-oui", "%02x %02x %02x (%s)", caps.sourceOui[0], caps.sourceOui[1], caps.sourceOui[2],
+					 ouiName(caps.sourceOui));
+			publishf("amd-state",
+					 "caps=0x%02x sdr-via-aux=%s hdr-via-aux=%s oled=%s enable=0x%02x control=0x%02x level=%u mnits "
+					 "transition=%u ms current=%u/%u mnits (peak/average)",
+					 caps.amdCaps, yesNo(caps.amdCaps & Backlight::AmdCapSdrAux), yesNo(caps.amdCaps & Backlight::AmdCapHdrAux),
+					 yesNo(caps.amdCaps & Backlight::AmdCapOled), caps.amdEnable, caps.amdControl, caps.amdLevel,
+					 caps.amdTransitionMs, caps.amdPeak, caps.amdAverage);
+		} else {
+			publish("source-oui", "unreadable");
+			publish("amd-state", "unreadable");
+		}
+
+		publishf("hint-backlight", "vesa-aux-set:%s vesa-pwm-pin:%s vesa-mode:%s intel-hdr-nits:%s intel-sdr-aux:%s amd-sdr-aux:%s",
 				 caps.haveVesa ? yesNo(caps.vesaAux) : "?",
 				 caps.haveVesa ? yesNo(caps.vesaPwmPin) : "?",
 				 caps.haveVesa ? vesaModeName(caps.vesaMode) : "?",
 				 caps.haveIntel ? yesNo(caps.intelNits) : "?",
-				 caps.haveIntel ? yesNo(caps.intelSdrAux) : "?");
+				 caps.haveIntel ? yesNo(caps.intelSdrAux) : "?",
+				 caps.haveAmd ? yesNo(caps.amdCaps & Backlight::AmdCapSdrAux) : "?");
 	}
 }
 
-bool AuxDimProbe::run(IOService *display, Result *result) {
+bool AuxDimProbe::run(IOService *display, Result *result, const Backend::Ops *backend) {
 	if (!display)
 		return false;
 	if (result)
@@ -288,24 +313,13 @@ bool AuxDimProbe::run(IOService *display, Result *result) {
 		Backlight::Caps caps;
 		if (Backlight::readCaps(aux, caps) == kIOReturnSuccess) {
 			describeCaps(caps);
-			bool intelUsable = caps.intelNits && caps.intelSdrAux && caps.intelNitsEnabled && caps.haveIntelLevel;
-			writable = intelUsable || caps.vesaAux;
+			writable = (caps.intelNits && caps.intelSdrAux) || caps.vesaAux;
 
 			if (result) {
-				if (intelUsable)
-					result->reason = "usable";
-				else if (!caps.haveIntel)
-					result->reason = "the Intel HDR interface (DPCD 0x340) could not be read";
-				else if (!caps.intelNits)
-					result->reason = "the panel does not advertise the Intel nits interface";
-				else if (!caps.intelSdrAux)
-					result->reason = "the panel does not accept Intel brightness over AUX";
-				else if (!caps.intelNitsEnabled)
-					result->reason = "brightness through AUX is not enabled (DPCD 0x344 bit 4 is clear)";
+				if (backend)
+					result->usable = backend->usable(caps, result->reason);
 				else
-					result->reason = "the Intel nits level could not be read";
-
-				result->intelUsable = intelUsable;
+					result->reason = "no backend selected";
 				// The level found in the panel is not a maximum (the firmware may have left it anywhere), so the top
 				// of the range only ever comes from the EDID or from the user, see Policy::maxNitsFor.
 				result->edidMaxNits = haveLum ? lum.average : 0;

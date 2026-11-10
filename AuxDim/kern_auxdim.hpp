@@ -2,9 +2,9 @@
 //  kern_auxdim.hpp
 //  AuxDim
 //
-//  With -auxdimprobe or -auxdimctl: watches the display parameters macOS sends to every IODisplay, probes the
-//  display hardware (-auxdimprobe, implied by -auxdimctl) and applies the brightness macOS asks for (-auxdimctl,
-//  see kern_control.hpp). Without either it does nothing.
+//  With -auxdimprobe or a backend argument (-auxdimintel, -auxdimamd, see kern_backend.hpp): watches the display parameters
+//  macOS sends to every IODisplay, probes the display hardware (implied by a backend) and applies the brightness
+//  macOS asks for through the backend (see kern_control.hpp). Without either it does nothing.
 //
 //  Copyright © 2026 nickk19. All rights reserved.
 //  Licensed under the BSD 3-Clause License, see LICENSE.
@@ -82,10 +82,12 @@ private:
 	static void probeEntry(thread_call_param_t param0, thread_call_param_t param1);
 
 	/**
-	 *  Brightness control (-auxdimctl, or auxdimnits=N for a fixed level at boot). Needs the probe to have found a
-	 *  usable Intel nits interface; until then requests are only remembered.
+	 *  Brightness control, enabled by a backend argument. Needs the probe to have found the backend's interface usable;
+	 *  until then requests are only remembered.
 	 */
 	bool ctlEnabled {false};
+	const Backend::Ops *ctlBackend {nullptr};
+	char ctlConflict[64] {};          // the backend arguments, when more than one was given
 	uint32_t ctlMaxNitsOverride {0}; // auxdimmaxnits=N, 0 when not set
 	uint32_t ctlRangeMisses {0}; // brightness requests that carried no usable min/max
 	Controller controller;

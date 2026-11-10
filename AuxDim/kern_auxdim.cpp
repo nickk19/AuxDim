@@ -34,7 +34,7 @@ void AuxDimCore::init() {
 
 	probeEnabled = checkKernelArgument("-auxdimprobe");
 
-	// Brightness control is opt-in. A fixed boot level implies it.
+	// Brightness control is opt-in: the user picks the backend with its boot argument, exactly one.
 	uint32_t forcedNits = 0, floorNits = 0;
 	lilu_get_boot_args("auxdimnits", &forcedNits, sizeof(forcedNits));
 	lilu_get_boot_args("auxdimminnits", &floorNits, sizeof(floorNits));
@@ -43,10 +43,23 @@ void AuxDimCore::init() {
 		SYSLOG("auxdim", "auxdimmaxnits=%u is outside %u...%u, ignored", ctlMaxNitsOverride, Policy::MinMaxNits, Policy::MaxMaxNits);
 		ctlMaxNitsOverride = 0;
 	}
-	ctlEnabled = checkKernelArgument("-auxdimctl") || forcedNits > 0;
+
+	size_t backends = 0;
+	ctlBackend = Backend::fromBootArgs(backends, ctlConflict, sizeof(ctlConflict));
+	if (backends > 1) {
+		// Keep the probe on, so that ctl-state can say why nothing happens.
+		SYSLOG("auxdim", "more than one backend given (%s), brightness control disabled: choose one", ctlConflict);
+		probeEnabled = true;
+	} else {
+		ctlConflict[0] = '\0';
+	}
+	if (!ctlBackend && (forcedNits || floorNits || ctlMaxNitsOverride))
+		SYSLOG("auxdim", "auxdimnits, auxdimminnits and auxdimmaxnits need a backend (%s), ignored", Backend::arguments);
+
+	ctlEnabled = ctlBackend != nullptr;
 	if (ctlEnabled) {
 		probeEnabled = true;
-		if (!controller.init(forcedNits, floorNits)) {
+		if (!controller.init(ctlBackend, forcedNits, floorNits)) {
 			SYSLOG("auxdim", "failed to set up the brightness controller, control disabled");
 			ctlEnabled = false;
 		}
@@ -70,7 +83,7 @@ void AuxDimCore::init() {
 	watch = watch || ADDPR(debugEnabled);
 #endif
 	if (!watch) {
-		SYSLOG("auxdim", "neither -auxdimctl nor -auxdimprobe given, nothing to do");
+		SYSLOG("auxdim", "no backend (%s) and no -auxdimprobe given, nothing to do", Backend::arguments);
 		return;
 	}
 
@@ -207,16 +220,17 @@ void AuxDimCore::probeEntry(thread_call_param_t param0, thread_call_param_t) {
 	bool retrying = false;
 	if (display) {
 		AuxDimProbe::Result result;
-		AuxDimProbe::run(display, &result);
+		AuxDimProbe::run(display, &result, self->ctlEnabled ? self->ctlBackend : nullptr);
+		if (self->ctlConflict[0])
+			AuxDimProbe::publishf("ctl-state", "inert: more than one backend given (%s), choose one", self->ctlConflict);
 
-		// Offer every display with a usable Intel nits interface to the controller: the first one is driven, a later one
-		// replaces it if it goes away. The status lines are about the display being looked for, so they stay quiet once
-		// one is driven.
+		// Offer every display the backend can drive to the controller: the first one is driven, a later one replaces it
+		// if it goes away. The status lines are about the display being looked for, so they stay quiet once one is driven.
 		uint32_t maxNits = Policy::maxNitsFor(result.edidMaxNits, self->ctlMaxNitsOverride);
-		if (self->ctlEnabled && result.intelUsable && maxNits) {
+		if (self->ctlEnabled && result.usable && maxNits) {
 			self->controller.attach(display, maxNits);
 		} else if (self->ctlEnabled && !self->controller.attached()) {
-			if (result.intelUsable) {
+			if (result.usable) {
 				AuxDimProbe::publishf("ctl-state", "inert on this display: the EDID gives no usable luminance range (frame-average "
 									 "%u nits, expected %u...%u); set auxdimmaxnits=N to the panel's full brightness to enable control",
 									 result.edidMaxNits, Policy::MinMaxNits, Policy::MaxMaxNits);

@@ -45,7 +45,7 @@ one the Linux i915 driver uses for Intel HDR TCON panels). The plumbing around i
  L3  Backend   chosen by the user with its boot argument, checked by the probe (Phase 1: Intel nits)
                  - VESA eDP AUX backlight   DPCD 0x720-0x723
                  - Intel HDR/SDR TCON nits  DPCD 0x340-0x35F (0x354)
-                 - AMD source backlight     DPCD 0x317, 0x320-0x32F (millinits)  (Phase 1, experimental)
+                 - AMD source backlight     DPCD 0x317, 0x320-0x32F (millinits)  (Phase 1)
                  - DDC/CI luminance         VCP 0x10  (external monitors)    (Phase 3)
         |
         v
@@ -115,14 +115,18 @@ level: `0x344` is `0x00`, the source OUI at `0x300` is empty, the VESA enable bi
 A register dump under Linux **[verified, one machine]** shows how amdgpu drives it: AMD's source OUI at `0x300` (`00 00 1a`),
 panel caps `0x317` = `0x17` (SDR and HDR brightness over AUX, OLED), level in millinits at `0x320` with a 50 ms transition,
 control `0x32E` = 1, enable `0x32F` = 1, current level reported at `0x326`/`0x32A`. The Intel block stays disabled and the VESA
-block untouched; the panel only mirrors the current level into `0x354`. Hence the AMD backend.
+block untouched; the panel only mirrors the current level into `0x354`. Hence the AMD backend. Tested on that machine under
+macOS **[verified, one machine]**: the firmware had already set `0x32F` and `0x32E`, so the backend switched nothing on; the
+source OUI stayed empty and was not needed; every write read back as expected through `0x32A`, and the level was written again
+after display sleep.
 
 ## 5. Safety rules for the write phase
 
 - Write only to whitelisted backlight registers, and only after the probe confirmed the matching capability on that display.
 - Never write to a display whose identity and capabilities were not probed; unknown panels stay read-only.
-- Clamp to a minimum luminance so the slider can never produce a black, unrecoverable screen (Phase 1: floor of 10 nits,
-  `auxdimminnits`, and the mapping can never leave the floor...maximum range).
+- Keep every level inside floor...maximum (Phase 1: the floor is 0 nits by default, so the lowest slider position darkens the
+  panel completely, as on a Mac; `auxdimminnits` raises it). The panel stays on: the brightness keys, the slider or `auxdimnits`
+  bring the light back.
 - Rate-limit AUX writes and coalesce bursts of slider events (Phase 1: one write per 30 ms, the newest value wins).
 - Write the level again on wake (Intel: only while `0x344` still enables AUX brightness; AMD: after switching its interface on
   again if needed) and keep `-auxdimoff` working at all times.
@@ -137,7 +141,7 @@ block untouched; the panel only mirrors the current level into `0x354`. Hence th
 |---|---|
 | 0 (done) | Observe `doIntegerSet`, read-only probe, hardware report workflow |
 | 0.5 (done) | Opt-in write test of the two level registers (removed afterwards: `auxdimnits=N` checks the write path), brightness request counters; SSDT-PNLF for the slider |
-| 1 (now) | Backends chosen by boot argument: Intel nits (`-auxdimintel`), and AMD (`-auxdimamd`, experimental, modelled on the Linux dump of issue #1); apply brightness from L1 events. Still to do: an opt-in to set `0x344` bit 4 again if a wake is ever seen to clear it |
+| 1 (now) | Backends chosen by boot argument: Intel nits (`-auxdimintel`), and AMD (`-auxdimamd`, modelled on the Linux dump of issue #1 and tested on that machine); apply brightness from L1 events. Still to do: an opt-in to set `0x344` bit 4 again if a wake is ever seen to clear it |
 | 2 | VESA backend, EDID keyed quirk table, curve and floor tuning, persistence across reboots |
 | 3 | DDC/CI backend for external monitors, per-display routing |
 | 4 | Polish: fades, packaging, documentation aimed at upstream Hackintosh guides |

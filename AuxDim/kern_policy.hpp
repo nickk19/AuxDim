@@ -44,19 +44,17 @@ namespace Policy {
 	}
 
 	/**
-	 *  Lowest luminance ever sent: the requested floor, at least 1 nit and always well below the top of the range.
+	 *  Lowest luminance ever sent: the requested floor (0 when none was given, the panel's darkest, as on a Mac),
+	 *  always well below the top of the range.
 	 */
 	inline uint32_t floorNitsFor(uint32_t requestedFloor, uint32_t maxNits) {
-		uint32_t floor = requestedFloor ? requestedFloor : 1;
-		if (floor >= maxNits)
-			floor = maxNits / 4;
-		return floor ? floor : 1;
+		return requestedFloor < maxNits ? requestedFloor : maxNits / 4;
 	}
 
 	/**
 	 *  Panel luminance in nits for a display brightness value.
 	 *
-	 *  The result always lies in [floorNits, maxNits], so no slider position can produce a black screen.
+	 *  The result always lies in [floorNits, maxNits].
 	 *
 	 *  - "linear-brightness" is proportional to luminance: nits = floor + (max - floor) * f
 	 *  - "brightness" is the perceptual slider position: a square law (gamma 2) approximates it,

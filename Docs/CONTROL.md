@@ -1,7 +1,7 @@
 # Brightness control (Phase 1)
 
 With a backend argument the plugin applies the brightness macOS asks for to the panel, through that backend's interface:
-`-auxdimintel` uses the Intel HDR/SDR nits interface (DPCD `0x354`); `-auxdimamd` (experimental) uses AMD's backlight interface
+`-auxdimintel` uses the Intel HDR/SDR nits interface (DPCD `0x354`); `-auxdimamd` uses AMD's backlight interface
 (DPCD `0x320`, level in millinits), the one the Linux amdgpu driver uses for OLED panels. Give exactly one; with more than one,
 control stays off. It is opt-in, off by default, and it was written for one machine (Lenovo IdeaPad Slim 5 14IAH8, Samsung OLED
 `ATNA40CT01-0`); other panels are expected to need the probe first, see [PROBING.md](PROBING.md).
@@ -13,7 +13,7 @@ control stays off. It is opt-in, off by default, and it was written for one mach
    only moves `linear-brightness` (0...65403 here); `brightness` keeps its start value, so after the first linear request plain
    `brightness` is ignored.
 2. A thread call, at most once every 30 ms, takes the newest request and maps it to nits: `linear-brightness` linearly, `brightness`
-   with a square law (a perceptual slider position), always inside `floor ... max`. The floor is 10 nits (`auxdimminnits`), the top
+   with a square law (a perceptual slider position), always inside `floor ... max`. The floor is 0 nits unless `auxdimminnits` raises it, the top
    is the EDID frame-average luminance (400 nits on this panel), the same value the Linux driver uses. Without a plausible value
    there (100 to 1000 nits) the controller stays inert unless `auxdimmaxnits=N` gives it: the level found in the panel is never
    taken as the maximum, because the firmware may have left it anywhere.
@@ -49,7 +49,7 @@ means [SSDT-PNLF](../Resources/ACPI). The plugin does not create it.
 1. Get the kext (a release zip, or build it with `make`, see the [README](../README.md)) and copy it into `EFI/OC/Kexts`, after Lilu.
 2. Put `Resources/ACPI/SSDT-PNLF.aml` into `EFI/OC/ACPI` and add it to `config.plist` under `ACPI -> Add`. Check first that no
    other SSDT already defines a `PNLF` / `backlight` device (`ioreg -l | grep -i -E "PNLF|backlight"`); two of them conflict.
-3. Boot arguments: `-auxdimintel` on Intel laptops, `-auxdimamd` (experimental) on AMD laptops whose probe shows `amd-state` with
+3. Boot arguments: `-auxdimintel` on Intel laptops, `-auxdimamd` on AMD laptops whose probe shows `amd-state` with
    `sdr-via-aux=yes` and `oled=yes` (add `-auxdimdbg` for the Debug build's logging).
 4. Reboot. The slider should now appear in System Settings > Displays and the panel should follow it.
 
@@ -68,6 +68,7 @@ ioreg -rc IODisplay -l -w0
 | `ctl-state` | `ready: ... floor...max nits ...` once attached; `waiting: ...` while the panel does not answer (with the error code and the attempt number); `inert on this display: <reason>` when it can never attach (no AUX interface, Intel nits interface not advertised, brightness through AUX not enabled in `0x344`, no luminance range in the EDID, gave up); `detached: ...` when the display went away and its replacement is not vetted yet |
 | `ctl-last` | The last applied request: parameter, value, range, resulting nits, `ret` of the write, counters |
 | `ctl-verify` | What the panel itself reports about 0.6 s after the last write (it reads one nit below the value written, that counts as "as expected") |
+| `ctl-timing` | How long the AUX transfers of a write take (last, average, maximum). The framebuffer lock is held that long, and macOS waits for it with every brightness request |
 | `ctl-activate` | The check before the first write to a display: the backend's mode register (`0x344` for Intel, `0x32F` for AMD), whether the backend switched it on, and whether the panel takes its level from AUX |
 | `ctl-wake` | The last wake: the backend's mode register and whether the level was written again (or why not) |
 | `brightness-events`, `brightness-last` | How many brightness requests macOS sent, and the last values |
@@ -86,7 +87,8 @@ ioreg -rc IODisplay -l -w0
 - Do the brightness keys work? They depend on the keyboard stack and the firmware, not on this plugin; if they do nothing, see [BRIGHTNESS-KEYS.md](BRIGHTNESS-KEYS.md).
 - Attach the output of the two commands above and `ctl-last` after moving the slider to the minimum and to the maximum.
 
-If the screen ever ends up too dark: the floor (10 nits unless `auxdimminnits` says otherwise) keeps it from going black, so the
-slider can still be found and moved up. A reboot alone does not help, because macOS sets its saved brightness again at boot.
+If the screen ever ends up too dark: with the default floor of 0 nits the lowest slider position darkens the panel completely,
+as on a Mac, and the brightness up key brings it back without seeing the screen. `auxdimminnits=N` keeps the lowest position
+visible. A reboot alone does not help, because macOS sets its saved brightness again at boot.
 `auxdimnits=N` forces a level at boot that stays until the slider is moved; removing the backend argument (or adding `-auxdimoff`)
 disables the plugin.

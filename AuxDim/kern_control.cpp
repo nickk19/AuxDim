@@ -355,7 +355,7 @@ void Controller::apply() {
 		// The panel kept its level across display sleep in every test so far, but nothing guarantees it (deeper sleep states,
 		// other firmware): write it again, with a fresh retry budget, once the backend confirms the panel still listens to AUX.
 		wakes++;
-		if (desiredPending || lastNits) {
+		if (desiredPending || haveLast) {
 			if (!desiredPending)
 				desiredNits = lastNits;
 			desiredPending = true;
@@ -377,16 +377,32 @@ void Controller::apply() {
 	uint8_t mode = 0;
 	bool switched = false;
 	bool on = true;
+	uint64_t started = 0, finished = 0;
 	IOLockLock(auxLock);
 	if (IOI2CInterface *bus = currentAux()) {
+		clock_get_uptime(&started);
 		writeRet = activating ? backend->activate(bus, mode, switched, on) : kIOReturnSuccess;
 		if (writeRet == kIOReturnSuccess && on)
 			writeRet = backend->write(bus, nits);
+		clock_get_uptime(&finished);
 	}
 	// The framebuffer may have replaced its interfaces (a wake that failed, a reconfiguration): look again next time.
 	if (writeRet != kIOReturnSuccess)
 		dropAux();
 	IOLockUnlock(auxLock);
+
+	// The transfers hold the framebuffer lock, which every brightness request from macOS also takes: if they are slow,
+	// the slider waits for them. Kept to tell whether that happens.
+	if (started) {
+		uint64_t ns = 0;
+		absolutetime_to_nanoseconds(finished - started, &ns);
+		ioLastUs = ns / 1000;
+		if (ioLastUs > ioMaxUs)
+			ioMaxUs = ioLastUs;
+		ioTotalUs += ioLastUs;
+		ioCount++;
+	}
+
 	if (switched && !switchedOn) {
 		switchedOn = true;
 		switchedFrom = mode;
@@ -417,6 +433,7 @@ void Controller::apply() {
 		desiredPending = false;
 		attempts = 0;
 		lastNits = nits;
+		haveLast = true;
 		if (activating && !wakeCheck)
 			AuxDimProbe::publishf("ctl-activate", "uptime %us: %s = 0x%02x%s", AuxDimProbe::uptimeSeconds(),
 								 backend->modeRegister, mode, switchedOn ? ", switched on" : "");
@@ -459,6 +476,11 @@ void Controller::apply() {
 
 	// Publish only when the slider has settled, not on every step of a drag.
 	if (!applyScheduled || retryNote[0]) {
+		if (ioCount)
+			AuxDimProbe::statusf("ctl-timing", "AUX per write: last %llu us, average %llu us, max %llu us over %u writes",
+								 static_cast<unsigned long long>(ioLastUs),
+								 static_cast<unsigned long long>(ioTotalUs / ioCount),
+								 static_cast<unsigned long long>(ioMaxUs), ioCount);
 		if (statusForced)
 			AuxDimProbe::statusf("ctl-last", "uptime %us: boot level %u nits, ret 0x%x, writes %u, failures %u%s",
 					  AuxDimProbe::uptimeSeconds(), nits, writeRet, writes, failures, retryNote);

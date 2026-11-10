@@ -88,7 +88,7 @@ private:
 	static constexpr uint32_t MaxRetries   {5};
 	static constexpr uint32_t VerifyMs     {600};
 	static constexpr uint32_t WakeDelayMs  {200};
-	static constexpr uint32_t DefaultFloorNits {10};
+	static constexpr uint32_t DefaultFloorNits {0}; // the lowest slider position darkens the panel completely, as on a Mac
 
 	struct Pending {
 		bool valid {false};
@@ -144,7 +144,12 @@ private:
 	uint32_t writes {0};
 	uint32_t failures {0};
 	volatile uint32_t lastNits {0};  // last level written successfully, what verify() expects the panel to report
+	bool haveLast {false};           // lastNits is valid (0 is a level like any other)
 	bool activated {false};          // the backend has confirmed its interface on the target (activate)
+	uint64_t ioLastUs {0};           // AUX time of the writes (activation included): the framebuffer lock is held that long
+	uint64_t ioMaxUs {0};
+	uint64_t ioTotalUs {0};
+	uint32_t ioCount {0};
 	bool switchedOn {false};         // an activation switched the interface on, not reported yet (the write may have failed)
 	uint8_t switchedFrom {0};        // the mode register before that
 	bool wakeCheck {false};          // activate again before the next write, then report it as ctl-wake

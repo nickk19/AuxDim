@@ -6,8 +6,8 @@
 //  panel (edp_backlight_enable_aux and edp_set_backlight_level_nits in link_edp_panel_control.c): the interface is
 //  enabled at 0x32F, then every level is written in millinits, with a transition time, at 0x320, followed by the control
 //  register 0x32E = 1. Unlike the Intel backend this one switches its interface on itself, since no firmware does it
-//  outside amdgpu: choosing -auxdimamd is the consent to that write. Experimental: modelled on a Linux register dump of one
-//  machine (ASUS UM325U, Samsung ATNA33XC11-0), not yet tested from macOS.
+//  outside amdgpu: choosing -auxdimamd is the consent to that write. Modelled on a Linux register dump of one machine
+//  (ASUS UM325U, Samsung ATNA33XC11-0) and tested on it under macOS (issue #1).
 //
 //  Copyright © 2026 nickk19. All rights reserved.
 //  Licensed under the BSD 3-Clause License, see LICENSE.

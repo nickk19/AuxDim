@@ -4,10 +4,10 @@ GPU-agnostic brightness control for displays that macOS cannot dim through the u
 OLED eDP panels dimmed over the DisplayPort AUX channel, and (later) external monitors dimmed over DDC/CI.
 It is a [Lilu](https://github.com/acidanthera/Lilu) plugin for Hackintosh.
 
-**Status: Phase 1, first brightness control, opt-in and untested beyond the author's machine.** Brightness control goes through a
+**Status: Phase 1, opt-in, tested on two machines (one Intel, one AMD).** Brightness control goes through a
 backend, chosen with its boot argument: `-auxdimintel` applies the brightness macOS asks for through the Intel nits interface (DPCD
-`0x354`), which is what the Lenovo IdeaPad Slim 5 14IAH8 panel `ATNA40CT01-0` turned out to need; `-auxdimamd` (experimental)
-does the same through AMD's backlight interface, the one the Linux amdgpu driver uses for OLED panels. With `-auxdimprobe` instead
+`0x354`), which is what the Lenovo IdeaPad Slim 5 14IAH8 panel `ATNA40CT01-0` turned out to need; `-auxdimamd` does the same
+through AMD's backlight interface, the one the Linux amdgpu driver uses for OLED panels (tested on an ASUS UM325U with NootedRed). With `-auxdimprobe` instead
 the plugin only reads the panel for diagnostics; with neither it does nothing. Setup and what to report: [Docs/CONTROL.md](Docs/CONTROL.md).
 See [Docs/ARCHITECTURE.md](Docs/ARCHITECTURE.md) for the design and the roadmap.
 
@@ -37,9 +37,9 @@ Details and caveats are in the architecture document.
 | `-auxdimbeta` | Allow running on macOS newer than the tested range |
 | `-auxdimprobe` | Run the read-only hardware probe, see [Docs/PROBING.md](Docs/PROBING.md) |
 | `-auxdimintel` | Backend: applies the macOS brightness through the Intel nits interface (implies the probe), see [Docs/CONTROL.md](Docs/CONTROL.md) |
-| `-auxdimamd` | Backend, experimental: the same through AMD's backlight interface (DPCD `0x320`), as amdgpu drives OLED panels; it switches that interface on itself (`0x32F`). Not yet tested from macOS |
+| `-auxdimamd` | Backend: the same through AMD's backlight interface (DPCD `0x320`), as amdgpu drives OLED panels; it switches that interface on itself (`0x32F`) when it is off |
 | `auxdimnits=N` | Sets this luminance (nits) as soon as the controller is up, until macOS sends a brightness |
-| `auxdimminnits=N` | Lowest luminance ever sent (default 10, at least 1), so the slider can never produce a black screen |
+| `auxdimminnits=N` | Lowest luminance ever sent, in nits. By default 0: at the lowest slider position the panel goes dark, as on a Mac; set it to keep the lowest notch visible |
 | `auxdimmaxnits=N` | Luminance at full brightness (100 to 1000 nits) for panels whose EDID does not give it; without it such a panel is left alone |
 
 Give exactly one backend argument: with more than one, control stays off and `ctl-state` says so. `auxdimnits`, `auxdimminnits`

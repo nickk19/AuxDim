@@ -25,7 +25,7 @@
 
 NAME      := AuxDim
 BUNDLE_ID := io.github.nickk19.AuxDim
-VERSION   := 0.3.0
+VERSION   := 0.4.0
 SRCDIR    := AuxDim
 
 # ---- knobs (override on the command line) ------------------------------------

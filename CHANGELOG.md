@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-11-11
 
 #### Added
 - Dimming before display sleep (`pmset` `halfdim`): when macOS dims the display (`dsyp` dimmed) the panel gets half its level,

@@ -7,8 +7,9 @@
 //  Input comes from the IODisplay::doIntegerSet hook, which runs with the framebuffer lock held, so
 //  request() only records the value. A thread call does the AUX I/O: it is throttled (at most one pass
 //  every ThrottleMs, always using the newest value, so dragging the slider is smooth and the AUX channel
-//  is not flooded) and retried a few times when the panel is not ready (asleep, just woken). When the display comes back
-//  on after being off, the level is written again. If the IODisplay the controller drives is terminated (the framebuffer
+//  is not flooded) and retried a few times when the panel is not ready (asleep, just woken). While macOS dims the display
+//  before display sleep the panel gets half its level; when the display comes back on after being off, the level is
+//  written again. If the IODisplay the controller drives is terminated (the framebuffer
 //  replaced it), the controller moves to its replacement once the probe has vetted it.
 //
 //  Enabled by a backend argument (-auxdimintel, -auxdimamd, see kern_backend.hpp).
@@ -77,8 +78,11 @@ public:
 
 	/**
 	 *  Record a display power change (the `dsyp` parameter: off, dimmed, on). Called from the hook: does not block, does no I/O.
-	 *  When the display is on again after having been off, the level it should have is written again, after the backend has
-	 *  checked that the panel still takes its brightness from AUX (Backend::Ops::activate); the result is published as ctl-wake.
+	 *
+	 *  - Dimmed, coming from on (pmset halfdim, a few seconds before display sleep): the panel gets half its level, never
+	 *    below the floor, the way a Mac halves its backlight. Back on, it gets its level again. Published as ctl-dim.
+	 *  - On after having been off: the level it should have is written again, after the backend has checked that the panel
+	 *    still takes its brightness from AUX (Backend::Ops::activate); the result is published as ctl-wake.
 	 */
 	void powerState(IOService *display, uint32_t state);
 
@@ -117,6 +121,8 @@ private:
 	bool linearSeen {false};
 	bool wasOff {false};         // the display went off and has not been on since
 	bool wakeRequested {false};  // it is on again: the next pass restores the level
+	bool dimmed {false};         // macOS dims the display (dsyp MinUsable): the panel gets half its level
+	bool dimChanged {false};     // dimmed changed: the next pass writes the level again
 	IOService *offered {nullptr};  // retained: handed over by attach(), taken over by the next pass
 	uint32_t offeredMaxNits {0};
 	IOService *spare {nullptr};    // retained: a usable display offered while another one was driven
@@ -138,13 +144,14 @@ private:
 	bool forcedPending {false};
 	bool attachedBefore {false};
 	uint32_t detaches {0};
-	uint32_t desiredNits {0};        // the level the panel should have: newest request, or the boot level
-	bool desiredPending {false};     // desiredNits has not reached the panel yet
+	uint32_t desiredNits {0};        // the level macOS asked for: newest request, or the boot level (never dimmed)
+	bool haveDesired {false};        // desiredNits is valid (0 is a level like any other)
+	bool desiredPending {false};     // desiredNits (or its dimmed half) has not reached the panel yet
+	bool dimReport {false};          // a dim change is being written, publish ctl-dim once it is
 	uint32_t attempts {0};           // failed writes of desiredNits; every new request starts again from 0
 	uint32_t writes {0};
 	uint32_t failures {0};
 	volatile uint32_t lastNits {0};  // last level written successfully, what verify() expects the panel to report
-	bool haveLast {false};           // lastNits is valid (0 is a level like any other)
 	bool activated {false};          // the backend has confirmed its interface on the target (activate)
 	uint64_t ioLastUs {0};           // AUX time of the writes (activation included): the framebuffer lock is held that long
 	uint64_t ioMaxUs {0};
@@ -175,6 +182,11 @@ private:
 	 */
 	void takeOver(IOService *display, uint32_t maxLevel);
 	void detach();
+
+	/**
+	 *  The level written while the display is dimmed: half the level, never below the floor (nor above the level).
+	 */
+	uint32_t dimmedNits(uint32_t nits) const;
 
 	void schedule(uint32_t delayMs);
 	void apply();

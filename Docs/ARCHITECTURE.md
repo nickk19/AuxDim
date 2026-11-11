@@ -39,7 +39,7 @@ one the Linux i915 driver uses for Intel HDR TCON panels). The plumbing around i
  L1  Input     IODisplay::doIntegerSet("brightness", v)   hook, independent of the GPU driver
         |
         v
- L2  Policy    range mapping, curve, floor, level written again on wake (Phase 1); fades (later)
+ L2  Policy    range mapping, curve, floor, half level while macOS dims the display, level written again on wake (Phase 1); fades (later)
         |
         v
  L3  Backend   chosen by the user with its boot argument, checked by the probe (Phase 1: Intel nits)
@@ -66,7 +66,7 @@ one that accepts the value **[verified in IOGraphics source]**. Two consequences
   parameter itself (`{min, max, value}`, from `getIntegerRange()`), the power handling (`updatePowerParam()`) passes the whole
   parameter dictionary. The range has to be looked up in both shapes. The power handling only sends `brightness` on a display
   without a `dsyp` (display power) parameter; a display that has one gets `dsyp` instead, which the controller watches to
-  write the level again after a wake.
+  halve the level while macOS dims the display before display sleep and to write it again after a wake.
 - On Tahoe the slider only moves `linear-brightness` **[verified, one machine]**; `brightness` keeps the value it had at start.
 
 By contrast, WhateverGreen applies brightness one level lower, in `AppleIntelFramebufferController::hwSetBacklight`

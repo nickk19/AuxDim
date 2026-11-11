@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+#### Added
+- Dimming before display sleep (`pmset` `halfdim`): when macOS dims the display (`dsyp` dimmed) the panel gets half its level,
+  never below the floor, as a Mac halves its backlight, and the whole level again when the display is on again (`ctl-dim`).
+  Before, the dimmed state was ignored and the panel went from full brightness to dark in one step at display sleep.
+
 ## 0.3.0 - 2026-11-10
 
 #### Added

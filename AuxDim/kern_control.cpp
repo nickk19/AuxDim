@@ -135,6 +135,8 @@ void Controller::takeOver(IOService *display, uint32_t maxLevel) {
 	}
 	wasOff = false;
 	wakeRequested = false;
+	dimmed = false;
+	dimChanged = false;
 	IOSimpleLockUnlock(lock);
 	IOLockUnlock(auxLock);
 
@@ -222,21 +224,44 @@ void Controller::powerState(IOService *display, uint32_t state) {
 		return;
 
 	bool wake = false;
+	bool dimChange = false;
 	IOSimpleLockLock(lock);
 	if (display == target) {
 		if (state == kIODisplayPowerStateOff) {
 			wasOff = true;
-		} else if (state >= kIODisplayPowerStateOn && wasOff) {
-			// Only a real wake: dimming before sleep and back (MinUsable, On) leaves the panel alone.
-			wasOff = false;
-			wakeRequested = true;
-			wake = true;
+		} else if (state == kIODisplayPowerStateMinUsable) {
+			// macOS dims the display before display sleep (pmset halfdim). Not on the way up from off: the panel is
+			// coming back, and on follows.
+			if (!wasOff && !dimmed) {
+				dimmed = true;
+				dimChanged = true;
+				dimChange = true;
+			}
+		} else if (state >= kIODisplayPowerStateOn) {
+			if (wasOff) {
+				wasOff = false;
+				wakeRequested = true;
+				wake = true;
+			}
+			if (dimmed) {
+				dimmed = false;
+				dimChanged = true;
+				dimChange = true;
+			}
 		}
 	}
 	IOSimpleLockUnlock(lock);
 
 	if (wake && ready)
 		schedule(WakeDelayMs);
+	else if (dimChange && ready)
+		schedule(ThrottleMs);
+}
+
+uint32_t Controller::dimmedNits(uint32_t nits) const {
+	const uint32_t half = nits / 2;
+	const uint32_t floor = nits < floorNits ? nits : floorNits;
+	return half > floor ? half : floor;
 }
 
 IOI2CInterface *Controller::currentAux() {
@@ -311,6 +336,8 @@ void Controller::apply() {
 	bool linear = false;
 	bool have = false;
 	bool wake = false;
+	bool dim = false;
+	bool dimChange = false;
 	IOService *from = nullptr;
 
 	IOSimpleLockLock(lock);
@@ -327,6 +354,9 @@ void Controller::apply() {
 	latest[1].valid = false;
 	wake = wakeRequested;
 	wakeRequested = false;
+	dim = dimmed;
+	dimChange = dimChanged;
+	dimChanged = false;
 	IOSimpleLockUnlock(lock);
 
 	if (have && from == target && chosen.max <= chosen.min) {
@@ -337,6 +367,7 @@ void Controller::apply() {
 	if (have && from == target) {
 		// A real request replaces the boot level and whatever was still being retried, with a fresh retry budget.
 		desiredNits = Policy::nitsFor(chosen.value, chosen.min, chosen.max, linear, floorNits, maxNits);
+		haveDesired = true;
 		desiredPending = true;
 		forcedPending = false;
 		attempts = 0;
@@ -345,6 +376,7 @@ void Controller::apply() {
 		statusRequest = chosen;
 	} else if (forcedPending) {
 		desiredNits = forcedNits;
+		haveDesired = true;
 		desiredPending = true;
 		forcedPending = false;
 		attempts = 0;
@@ -355,9 +387,7 @@ void Controller::apply() {
 		// The panel kept its level across display sleep in every test so far, but nothing guarantees it (deeper sleep states,
 		// other firmware): write it again, with a fresh retry budget, once the backend confirms the panel still listens to AUX.
 		wakes++;
-		if (desiredPending || haveLast) {
-			if (!desiredPending)
-				desiredNits = lastNits;
+		if (haveDesired) {
 			desiredPending = true;
 			attempts = 0;
 			wakeCheck = true;
@@ -367,11 +397,18 @@ void Controller::apply() {
 		}
 	}
 
+	if (dimChange && haveDesired) {
+		// Dimmed or back: the same level, halved or whole. After a wake ctl-wake reports instead.
+		desiredPending = true;
+		attempts = 0;
+		dimReport = !wakeCheck;
+	}
+
 	if (!desiredPending)
 		return;
 
 	// The range keeps every level well inside the 16 bit register (Policy::MaxMaxNits).
-	const uint32_t nits = desiredNits;
+	const uint32_t nits = dim ? dimmedNits(desiredNits) : desiredNits;
 	const bool activating = !activated || wakeCheck;
 	IOReturn writeRet = kIOReturnNotAttached;
 	uint8_t mode = 0;
@@ -433,7 +470,6 @@ void Controller::apply() {
 		desiredPending = false;
 		attempts = 0;
 		lastNits = nits;
-		haveLast = true;
 		if (activating && !wakeCheck)
 			AuxDimProbe::publishf("ctl-activate", "uptime %us: %s = 0x%02x%s", AuxDimProbe::uptimeSeconds(),
 								 backend->modeRegister, mode, switchedOn ? ", switched on" : "");
@@ -452,6 +488,14 @@ void Controller::apply() {
 								 switchedOn ? " (switched on)" : "", nits);
 		}
 		switchedOn = false;
+
+		if (dimReport) {
+			dimReport = false;
+			if (dim)
+				AuxDimProbe::publishf("ctl-dim", "uptime %us: dimmed, %u -> %u nits", AuxDimProbe::uptimeSeconds(), desiredNits, nits);
+			else
+				AuxDimProbe::publishf("ctl-dim", "uptime %us: back from dim, %u nits", AuxDimProbe::uptimeSeconds(), nits);
+		}
 	} else {
 		failures++;
 		// Most likely the framebuffer is not powered yet (boot, wake): keep the level and try again, waiting longer
@@ -465,6 +509,7 @@ void Controller::apply() {
 			thread_call_enter_delayed(retryCall, deadline);
 		} else {
 			desiredPending = false;
+			dimReport = false;
 			snprintf(retryNote, sizeof(retryNote), ", gave up after %u retries", MaxRetries);
 			if (wakeCheck) {
 				wakeCheck = false;
@@ -475,6 +520,9 @@ void Controller::apply() {
 	}
 
 	// Publish only when the slider has settled, not on every step of a drag.
+	char dimNote[32] = "";
+	if (dim)
+		snprintf(dimNote, sizeof(dimNote), ", dimmed to %u nits", nits);
 	if (!applyScheduled || retryNote[0]) {
 		if (ioCount)
 			AuxDimProbe::statusf("ctl-timing", "AUX per write: last %llu us, average %llu us, max %llu us over %u writes",
@@ -482,12 +530,12 @@ void Controller::apply() {
 								 static_cast<unsigned long long>(ioTotalUs / ioCount),
 								 static_cast<unsigned long long>(ioMaxUs), ioCount);
 		if (statusForced)
-			AuxDimProbe::statusf("ctl-last", "uptime %us: boot level %u nits, ret 0x%x, writes %u, failures %u%s",
-					  AuxDimProbe::uptimeSeconds(), nits, writeRet, writes, failures, retryNote);
+			AuxDimProbe::statusf("ctl-last", "uptime %us: boot level %u nits, ret 0x%x, writes %u, failures %u%s%s",
+					  AuxDimProbe::uptimeSeconds(), desiredNits, writeRet, writes, failures, dimNote, retryNote);
 		else
-			AuxDimProbe::statusf("ctl-last", "uptime %us: %s %u (range %u...%u) -> %u nits, ret 0x%x, writes %u, failures %u%s",
+			AuxDimProbe::statusf("ctl-last", "uptime %us: %s %u (range %u...%u) -> %u nits, ret 0x%x, writes %u, failures %u%s%s",
 					  AuxDimProbe::uptimeSeconds(), statusLinear ? "linear-brightness" : "brightness", statusRequest.value,
-					  statusRequest.min, statusRequest.max, nits, writeRet, writes, failures, retryNote);
+					  statusRequest.min, statusRequest.max, desiredNits, writeRet, writes, failures, dimNote, retryNote);
 	}
 }
 

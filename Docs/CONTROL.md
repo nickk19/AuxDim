@@ -38,8 +38,11 @@ control stays off. It is opt-in, off by default, and it was written for one mach
 6. When the display comes back on after having been off (the `dsyp` parameter goes from off to on; the dimming before display
    sleep does not count), the level is written again after 0.2 s, with the same retries, after the same check as before the first
    write. Intel: if `0x344` bit 4 is clear the level is not written, since the panel would ignore it; turning the bit back on is
-   not done yet. AMD: `0x32F` is set again if the panel lost it. `ctl-wake` reports what was found. A display without a `dsyp` parameter gets no such restore
-   (`power-last` never appears).
+   not done yet. AMD: `0x32F` is set again if the panel lost it. `ctl-wake` reports what was found. A display without a `dsyp`
+   parameter gets no such restore (`power-last` never appears).
+7. With `halfdim` on (`pmset -g`), macOS dims the display a few seconds before display sleep (`dsyp` goes from on to dimmed). A Mac
+   halves its backlight there; the controller writes half the level, never below the floor, and the whole level again when the
+   display is on again. If the display sleeps instead, step 6 brings back the whole level on wake. `ctl-dim` reports both.
 
 The slider and the brightness keys only exist in macOS when the panel has a `backlight` device, which on this kind of machine
 means [SSDT-PNLF](../Resources/ACPI). The plugin does not create it.
@@ -71,6 +74,7 @@ ioreg -rc IODisplay -l -w0
 | `ctl-timing` | How long the AUX transfers of a write take (last, average, maximum). The framebuffer lock is held that long, and macOS waits for it with every brightness request |
 | `ctl-activate` | The check before the first write to a display: the backend's mode register (`0x344` for Intel, `0x32F` for AMD), whether the backend switched it on, and whether the panel takes its level from AUX |
 | `ctl-wake` | The last wake: the backend's mode register and whether the level was written again (or why not) |
+| `ctl-dim` | The last dim before display sleep (`dimmed, <level> -> <half> nits`) or the return from it (`back from dim`) |
 | `brightness-events`, `brightness-last` | How many brightness requests macOS sent, and the last values |
 | `power-last` | The last display power state macOS set (`dsyp`: 0 off, 1 dimmed, 2 on) and how many changes so far |
 | `ctl-range-misses` | Requests dropped because they carried no min/max. Must stay 0 |
@@ -84,6 +88,8 @@ ioreg -rc IODisplay -l -w0
 - Is the lowest notch usable (not too dark, not still too bright)? The floor and the curve are guesses until someone tries them.
 - Does the brightness survive sleep and wake? If the panel comes back at the wrong level, say whether moving the slider fixes it.
   Attach `ctl-wake` and `power-last` after a display sleep (`pmset displaysleepnow`) and after a system sleep.
+- With `halfdim` on, does the panel dim to half a few seconds before display sleep and come back when you touch the mouse?
+  Attach `ctl-dim`.
 - Do the brightness keys work? They depend on the keyboard stack and the firmware, not on this plugin; if they do nothing, see [BRIGHTNESS-KEYS.md](BRIGHTNESS-KEYS.md).
 - Attach the output of the two commands above and `ctl-last` after moving the slider to the minimum and to the maximum.
 
